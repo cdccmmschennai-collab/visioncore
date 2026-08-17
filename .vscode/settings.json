@@ -1,0 +1,11 @@
+{
+  "python.defaultInterpreterPath": "backend/.venv/bin/python",
+  "python.analysis.extraPaths": ["backend"],
+  "editor.formatOnSave": false,
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/node_modules": true,
+    "**/.venv": true
+  },
+  "typescript.tsdk": "frontend/node_modules/typescript/lib"
+}

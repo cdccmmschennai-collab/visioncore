@@ -1,0 +1,119 @@
+"""Application settings, loaded once from the environment.
+
+pydantic-settings validates and coerces at import time, so a typo'd env var
+fails at startup with a clear message instead of surfacing as a mystery None
+deep inside a request handler.
+"""
+from functools import lru_cache
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # ── App ──────────────────────────────────────────────────────────────────
+    app_name: str = "Visioncore"
+    company_name: str = Field("Visioncore", alias="COMPANY_NAME")
+    api_v1_prefix: str = "/api/v1"
+    cors_origins: str = Field("http://localhost:5173", alias="CORS_ORIGINS")
+
+    # ── Database ─────────────────────────────────────────────────────────────
+    postgres_user: str = Field("visioncore", alias="POSTGRES_USER")
+    postgres_password: str = Field("visioncore", alias="POSTGRES_PASSWORD")
+    postgres_db: str = Field("visioncore", alias="POSTGRES_DB")
+    postgres_host: str = Field("localhost", alias="POSTGRES_HOST")
+    postgres_port: int = Field(5432, alias="POSTGRES_PORT")
+
+     # ── Background jobs ───────────────────────────────────────────────────────
+    redis_url: str = Field("redis://localhost:6379/0", alias="REDIS_URL")
+    celery_result_backend: str = Field("redis://localhost:6379/1", alias="CELERY_RESULT_BACKEND")
+
+    # ── Security ─────────────────────────────────────────────────────────────
+    jwt_secret: str = Field("dev-only-secret-change-me", alias="JWT_SECRET")
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = Field(60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    refresh_token_expire_days: int = Field(7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
+
+    # ── AI provider ──────────────────────────────────────────────────────────
+    # Use "gemini" for temporary/sample testing and "claude" for production.
+    ai_provider: str = Field("claude", alias="AI_PROVIDER")
+
+    # ── Claude ───────────────────────────────────────────────────────────────
+    anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
+    claude_model: str = Field("claude-sonnet-5", alias="CLAUDE_MODEL")
+    claude_max_tokens: int = Field(4096, alias="CLAUDE_MAX_TOKENS")
+    claude_input_price_per_mtok: float = Field(3.00, alias="CLAUDE_INPUT_PRICE_PER_MTOK")
+    claude_output_price_per_mtok: float = Field(15.00, alias="CLAUDE_OUTPUT_PRICE_PER_MTOK")
+    claude_credit_budget_usd: float = Field(100.00, alias="CLAUDE_CREDIT_BUDGET_USD")
+
+     # ── Gemini (temporary/sample provider) ──────────────────────────────────
+    gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
+    gemini_model: str = Field("gemini-3.6-flash", alias="GEMINI_MODEL")
+    gemini_max_tokens: int = Field(4096, alias="GEMINI_MAX_TOKENS")
+    # Set these to 0 when using a free-tier sample account. Update them if
+    # your Gemini plan is billed and you want accurate dashboard costs.
+    gemini_input_price_per_mtok: float = Field(0.0, alias="GEMINI_INPUT_PRICE_PER_MTOK")
+    gemini_output_price_per_mtok: float = Field(0.0, alias="GEMINI_OUTPUT_PRICE_PER_MTOK")
+
+    # ── Uploads ──────────────────────────────────────────────────────────────
+    storage_dir: str = Field("./storage", alias="STORAGE_DIR")
+    max_images_per_batch: int = Field(20, alias="MAX_IMAGES_PER_BATCH")
+    max_tags_per_batch: int = Field(10, alias="MAX_TAGS_PER_BATCH")
+    max_images_per_tag: int = Field(5, alias="MAX_IMAGES_PER_TAG")
+    max_image_size_mb: int = Field(15, alias="MAX_IMAGE_SIZE_MB")
+
+    # ── Template path columns ────────────────────────────────────────────────
+    # The reference workbook records the network location of each photo and
+    # workbook in INPUT PHOTOS / OUTPUT WITH IMAGES. Point these at your share
+    # to reproduce that exactly; leave blank to write bare filenames instead.
+    template_input_path_prefix: str = Field(
+        r"Z:\CMMS-CMN\DISCN\SOFTWARE TOOL TEAM\4-8-26(FINAL OUTPUT)\INPUT",
+        alias="TEMPLATE_INPUT_PATH_PREFIX",
+    )
+    template_output_path_prefix: str = Field(
+        r"Z:\CMMS-CMN\DISCN\SOFTWARE TOOL TEAM\4-8-26(FINAL OUTPUT)\OUTPUT",
+        alias="TEMPLATE_OUTPUT_PATH_PREFIX",
+    )
+
+    # ── Seed accounts ────────────────────────────────────────────────────────
+    seed_admin_username: str = Field("admin", alias="SEED_ADMIN_USERNAME")
+    seed_admin_password: str = Field("Admin@123", alias="SEED_ADMIN_PASSWORD")
+    seed_user_username: str = Field("user", alias="SEED_USER_USERNAME")
+    seed_user_password: str = Field("User@123", alias="SEED_USER_PASSWORD")
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def database_url(self) -> str:
+        """Async driver URL used by the app at runtime."""
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @property
+    def sync_database_url(self) -> str:
+        """Sync driver URL — Alembic runs migrations synchronously."""
+        return (
+            f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
