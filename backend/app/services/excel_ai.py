@@ -23,6 +23,7 @@ from app.services.fields import (
     FIELDS,
     QUALITY_CONFIRMED,
     REMARKS_FIELD,
+    is_blank,
     quality_of,
     value_of,
 )
@@ -35,6 +36,11 @@ CONFIRMED_FILL = "FFE2EFDA"
 CONFIRMED_TEXT = "FF375623"
 VERIFY_FILL = "FFFFC000"
 VERIFY_TEXT = "FF7F4E00"
+# Not a quality mark — the AI found nothing to grade, so it gets a neutral
+# gray rather than the amber "Verify" would wrongly imply a reading exists.
+MISSING_LABEL = "Data not available"
+MISSING_FILL = "FFE0E0E0"
+MISSING_TEXT = "FF595959"
 
 _THIN = Side(style="thin", color="FFB4C6E7")
 BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
@@ -99,15 +105,22 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
         a = ws.cell(row=row, column=1, value=field.ai_label)
         a.font, a.fill, a.alignment, a.border = label_font, label_fill, left_top, BORDER
 
-        b = ws.cell(row=row, column=2, value=value_of(payload, field.key))
+        value = value_of(payload, field.key)
+        b = ws.cell(row=row, column=2, value=value)
         b.font, b.alignment, b.border = body_font, left_top, BORDER
 
+        missing = is_blank(value)
         quality = quality_of(payload, field.key)
-        c = ws.cell(row=row, column=3, value=quality)
         confirmed = quality == QUALITY_CONFIRMED
-        c.font = Font(name="Calibri", size=11, bold=True,
-                      color=CONFIRMED_TEXT if confirmed else VERIFY_TEXT)
-        c.fill = PatternFill("solid", fgColor=CONFIRMED_FILL if confirmed else VERIFY_FILL)
+        c = ws.cell(row=row, column=3, value=MISSING_LABEL if missing else quality)
+        c.font = Font(
+            name="Calibri", size=11, bold=True,
+            color=MISSING_TEXT if missing else (CONFIRMED_TEXT if confirmed else VERIFY_TEXT),
+        )
+        c.fill = PatternFill(
+            "solid",
+            fgColor=MISSING_FILL if missing else (CONFIRMED_FILL if confirmed else VERIFY_FILL),
+        )
         c.alignment, c.border = centred, BORDER
 
         ws.row_dimensions[row].height = TALL_ROWS.get(field.key, 18.0)
@@ -133,6 +146,8 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
         ("Verify", VERIFY_FILL, VERIFY_TEXT,
          "Inferred, referenced, worn/partly legible, or not printed on the tag "
          "\u2014 recommend field verification"),
+        (MISSING_LABEL, MISSING_FILL, MISSING_TEXT,
+         "The AI found no such detail on the nameplate \u2014 nothing to confirm or verify"),
     )
     for offset, (label, fill, text_color, note) in enumerate(legend, start=1):
         r = legend_row + offset

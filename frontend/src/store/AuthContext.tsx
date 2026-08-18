@@ -17,7 +17,7 @@ const AuthContext = createContext<AuthValue | null>(null)
 const REMEMBERED_USER = 'visioncore.remembered'
 
 // Auto-logout after this long with no mouse/keyboard/API activity.
-const IDLE_LIMIT_MS = 2 * 60 * 1000
+const IDLE_LIMIT_MS = 15 * 60 * 1000
 // Coalesce high-frequency events (mousemove) so we touch localStorage/timers at most this often.
 const ACTIVITY_THROTTLE_MS = 1000
 // Last-activity timestamp, shared across tabs and survives a page refresh.
@@ -67,8 +67,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false)
         return
       }
-      const storedActivity = Number(localStorage.getItem(LAST_ACTIVITY_KEY))
-      if (storedActivity && Date.now() - storedActivity >= IDLE_LIMIT_MS) {
+      const storedActivityRaw = localStorage.getItem(LAST_ACTIVITY_KEY)
+      const storedActivity = storedActivityRaw ? Number(storedActivityRaw) : 0
+      // No provable recent activity (or too old) — never trust a bare token.
+      if (!storedActivity || Date.now() - storedActivity >= IDLE_LIMIT_MS) {
         tokenStore.clear()
         localStorage.removeItem(LAST_ACTIVITY_KEY)
         setLoading(false)

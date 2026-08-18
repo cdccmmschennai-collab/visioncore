@@ -135,13 +135,8 @@ async def process_item(item_id: int, user_id: int) -> None:
             result = await extractor.extract(photo_paths, item.tag_number, item.description)
         except ExtractionError as exc:
             logger.exception("Extraction failed for %s", item.tag_number)
-            fallback_model = (
-                settings.gemini_model
-                if settings.ai_provider.strip().lower() == "gemini"
-                else settings.claude_model
-            )
             session.add(ApiUsage(
-                user_id=user_id, tag_number=item.tag_number, model=fallback_model,
+                user_id=user_id, tag_number=item.tag_number, model=settings.claude_model,
                 success=False, error_message=str(exc)[:2000],
             ))
             await _set_status(session, item, ItemStatus.FAILED, str(exc))
