@@ -130,6 +130,12 @@
   font-size: 12px; color: var(--vc-muted); font-weight: 600;
   letter-spacing: 0.02em;
 }
+.kpi-card-info      { background: var(--vc-info-wash);      border-color: var(--vc-info); }
+.kpi-card-confirmed { background: var(--vc-confirmed-wash); border-color: var(--vc-confirmed); }
+.kpi-card-danger    { background: var(--vc-danger-wash);    border-color: var(--vc-danger); }
+.kpi-card-info .kpi-value      { color: var(--vc-info); }
+.kpi-card-confirmed .kpi-value { color: var(--vc-confirmed); }
+.kpi-card-danger .kpi-value    { color: var(--vc-danger); }
 .row-clickable { cursor: pointer; }
 
 /* ── Dropzone ────────────────────────────────────────────────────────────── */

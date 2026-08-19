@@ -45,7 +45,7 @@ export default function Header() {
     <header className="app-header">
       <div className="header-left">
         <Link to="/" className="header-brand" aria-label={`${COMPANY_NAME} home`}>
-          <Logo size={34} name="CDC INTERNATIONAL" />
+          <Logo size={34} name="CDC INTERNATIONAL PVT LMT" />
         </Link>
       </div>
 

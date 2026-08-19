@@ -228,7 +228,7 @@ export default function NewBatch() {
         </div>
         <div className="row gap-12 wrap">
           {batch && <span className="chip chip-neutral">{batch.reference}</span>}
-          <button type="button" className="btn btn-primary" onClick={startOver} disabled={busy}>
+          <button type="button" className="btn btn-primary" onClick={startOver}>
             New Batch
           </button>
         </div>

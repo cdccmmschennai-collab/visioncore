@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import Logo from '@/components/Logo'
 import Spinner from '@/components/Spinner'
 import { COMPANY_NAME } from '@/config'
@@ -9,7 +9,6 @@ import '@/styles/login.css'
 export default function Login() {
   const { user, signIn, loading } = useAuth()
   const navigate = useNavigate()
-  const location = useLocation() as { state?: { from?: string } }
 
   const remembered = rememberedUsername()
   const [username, setUsername] = useState(remembered)
@@ -19,7 +18,8 @@ export default function Login() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  if (!loading && user) return <Navigate to={location.state?.from ?? '/'} replace />
+  // Always Home — never a prior user's (or this user's own stale) last page.
+  if (!loading && user) return <Navigate to="/" replace />
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -27,7 +27,7 @@ export default function Login() {
     setBusy(true)
     try {
       await signIn(username.trim(), password, remember)
-      navigate(location.state?.from ?? '/', { replace: true })
+      navigate('/', { replace: true })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not sign you in.')
       setPassword('')

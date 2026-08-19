@@ -27,7 +27,6 @@ export default function Home() {
   const [tagsTotal, setTagsTotal] = useState(0)
   const [recentTags, setRecentTags] = useState<AssetTag[]>([])
   const [batches, setBatches] = useState<Batch[]>([])
-  const [downloadsTotal, setDownloadsTotal] = useState(0)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -35,14 +34,12 @@ export default function Home() {
     Promise.all([
       api.listTags('', 1, 6),
       api.listBatches(100),
-      api.history({ action: 'download', page: 1, pageSize: 1 }),
     ])
-      .then(([tagsPage, batchList, downloads]) => {
+      .then(([tagsPage, batchList]) => {
         if (cancelled) return
         setTagsTotal(tagsPage.total)
         setRecentTags(tagsPage.items)
         setBatches(batchList)
-        setDownloadsTotal(downloads.total)
       })
       .catch(() => undefined)
       .finally(() => !cancelled && setLoading(false))
@@ -54,10 +51,9 @@ export default function Home() {
   const recentBatches = batches.slice(0, 6)
 
   const kpis = [
-    { label: 'Total Image Extracted', value: tagsTotal },
-    { label: 'Completed Batches', value: completedBatches },
-    { label: 'Failed Batches', value: failedBatches},
-    { label: 'Total Downloads', value: downloadsTotal},
+    { label: 'Total Image Extracted', value: tagsTotal, tone: 'info' },
+    { label: 'Completed Batches', value: completedBatches, tone: 'confirmed' },
+    { label: 'Failed Batches', value: failedBatches, tone: 'danger' },
   ]
 
   return (
@@ -75,7 +71,7 @@ export default function Home() {
 
       <div className="kpi-grid">
         {kpis.map((kpi) => (
-          <div key={kpi.label} className="card kpi-card">
+          <div key={kpi.label} className={`card kpi-card kpi-card-${kpi.tone}`}>
             <div className="stack gap-4">
               <span className="kpi-value">{loading ? '—' : formatNumber(kpi.value)}</span>
               <span className="kpi-label">{kpi.label}</span>
