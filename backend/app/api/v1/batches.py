@@ -44,7 +44,7 @@ from app.services.filename_parser import (
     parse_folder_name,
     safe_filename,
 )
-from app.services.pipeline import generate_workbooks, process_batch
+from app.services.pipeline import generate_workbooks, process_batch, reextract_item
 from app.services.storage import ai_output_name, resolve_stored, save_upload, template_output_name
 
 router = APIRouter(prefix="/batches", tags=["batches"])
@@ -283,6 +283,26 @@ async def upload(
 async def get_batch(batch_id: int, user: CurrentUser, db: DbSession) -> BatchOut:
     """Polled by the UI while the status rail advances."""
     return _batch_out(await _load_batch(db, batch_id, user))
+
+
+@router.post("/{batch_id}/items/{item_id}/retry", response_model=BatchItemOut)
+async def retry_item(
+    batch_id: int, item_id: int, user: CurrentUser, db: DbSession, background: BackgroundTasks
+) -> BatchItemOut:
+    """Re-extract one failed tag in place — no new batch, tag, or image rows."""
+    batch = await _load_batch(db, batch_id, user)
+    item = next((i for i in batch.items if i.id == item_id), None)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That tag isn't part of this batch.")
+    if item.status != ItemStatus.FAILED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only a failed tag can be retried.")
+
+    item.status = ItemStatus.UPLOADED
+    batch.status = BatchStatus.PROCESSING
+    await db.commit()
+
+    background.add_task(reextract_item, item.id, batch.id, user.id)
+    return _item_out(item)
 
 
 @router.get("/{batch_id}/images/{image_id}")

@@ -44,6 +44,7 @@ export default function NewBatch() {
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set())
   const [viewingBatchId, setViewingBatchId] = useState<number | null>(null)
   const [viewingItemId, setViewingItemId] = useState<number | null>(null)
+  const [retryingIds, setRetryingIds] = useState<Set<number>>(new Set())
   const pollRef = useRef<number | null>(null)
   const dropzoneRef = useRef<DropzoneHandle>(null)
 
@@ -73,6 +74,17 @@ export default function NewBatch() {
         try {
           const fresh = await api.getBatch(batchId)
           setBatch(fresh)
+          // A retried item is done once it leaves the active pipeline states.
+          setRetryingIds((prev) => {
+            if (prev.size === 0) return prev
+            const stillActive = new Set(
+              fresh.items
+                .filter((item) => item.status === 'uploaded' || item.status === 'extracting' || item.status === 'processing')
+                .map((item) => item.id),
+            )
+            const next = new Set([...prev].filter((id) => stillActive.has(id)))
+            return next.size === prev.size ? prev : next
+          })
           if (TERMINAL.has(fresh.status)) {
             stopPolling()
             const failures = fresh.items.filter((item) => item.status === 'failed').length
@@ -87,6 +99,23 @@ export default function NewBatch() {
     },
     [stopPolling, toast],
   )
+
+  /** Re-run extraction for one failed tag only — the rest of the batch is untouched. */
+  const retryTag = async (itemId: number) => {
+    if (!batch) return
+    setRetryingIds((prev) => new Set(prev).add(itemId))
+    try {
+      await api.retryItem(batch.id, itemId)
+      startPolling(batch.id)
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not retry that tag.')
+      setRetryingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(itemId)
+        return next
+      })
+    }
+  }
 
   // Opened from a Recent Batches row (/batch/:batchId) — load that batch's
   // details instead of showing the upload dropzone.
@@ -328,6 +357,18 @@ export default function NewBatch() {
                     {' • '}
                     {formatFileSize(item.images.reduce((sum, image) => sum + image.size_bytes, 0))}
                   </span>
+                  {item.status === 'failed'
+                    && !(item.error_message ?? '').startsWith('Excel generation failed') && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => retryTag(item.id)}
+                      disabled={retryingIds.has(item.id)}
+                    >
+                      {retryingIds.has(item.id) ? <Spinner size={14} /> : null}
+                      {retryingIds.has(item.id) ? 'Re-Extracting…' : 'Re-Extract'}
+                    </button>
+                  )}
                 </div>
 
                 <StatusRail status={item.status} />

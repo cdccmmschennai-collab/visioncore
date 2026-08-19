@@ -199,6 +199,24 @@ async def process_item(item_id: int, user_id: int) -> None:
         await session.commit()
 
 
+async def _rollup_batch_status(batch_id: int) -> None:
+    """Recompute a batch's status from its items' current statuses."""
+    async with AsyncSessionLocal() as session:
+        batch = await session.scalar(
+            select(Batch).options(selectinload(Batch.items)).where(Batch.id == batch_id)
+        )
+        if batch is None:
+            return
+        statuses = {i.status for i in batch.items}
+        if ItemStatus.FAILED not in statuses:
+            batch.status = BatchStatus.COMPLETED
+        elif statuses <= {ItemStatus.FAILED}:
+            batch.status = BatchStatus.FAILED
+        else:
+            batch.status = BatchStatus.PARTIAL
+        await session.commit()
+
+
 async def process_batch(batch_id: int, user_id: int) -> None:
     """Run every pending tag in a batch, then roll the batch status up."""
     async with AsyncSessionLocal() as session:
@@ -214,17 +232,16 @@ async def process_batch(batch_id: int, user_id: int) -> None:
     for item_id in item_ids:
         await process_item(item_id, user_id)
 
-    async with AsyncSessionLocal() as session:
-        batch = await session.scalar(
-            select(Batch).options(selectinload(Batch.items)).where(Batch.id == batch_id)
-        )
-        if batch is None:
-            return
-        statuses = {i.status for i in batch.items}
-        if ItemStatus.FAILED not in statuses:
-            batch.status = BatchStatus.COMPLETED
-        elif statuses <= {ItemStatus.FAILED}:
-            batch.status = BatchStatus.FAILED
-        else:
-            batch.status = BatchStatus.PARTIAL
-        await session.commit()
+    await _rollup_batch_status(batch_id)
+
+
+async def reextract_item(item_id: int, batch_id: int, user_id: int) -> None:
+    """Re-run extraction for one previously failed tag, in place.
+
+    `process_item` re-checks for an existing AssetTag before creating one, and
+    a failed attempt never created one — so this reuses the same tag/image/
+    batch rows and cannot produce a duplicate. It's process_item plus a batch
+    status refresh, nothing more.
+    """
+    await process_item(item_id, user_id)
+    await _rollup_batch_status(batch_id)
