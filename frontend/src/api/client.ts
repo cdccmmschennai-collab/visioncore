@@ -1,7 +1,7 @@
 import { API_V1 } from '@/config'
 import type { StagedFile } from '@/utils/upload'
 import type {
-  AdminStats, AssetTag, Batch, BatchItem, ExtractionPayload, HistoryRow,
+  AdminStats, AssetTag, Batch, BatchItem, ExtractedImage, ExtractionPayload, HistoryRow,
   Page, TokenResponse, UploadResponse, UsageSummary, User,
 } from './types'
 
@@ -187,6 +187,12 @@ export const api = {
   getBatch: (id: number, signal?: AbortSignal) =>
     request<Batch>(`/batches/${id}`, { signal }),
   listBatches: (limit = 20) => request<Batch[]>(`/batches?limit=${limit}`),
+  listBatchesByStatus: (statusFilter: 'completed' | 'failed', page = 1, pageSize = 10) =>
+    request<Page<Batch>>(
+      `/batches/by-status?status=${statusFilter}&page=${page}&page_size=${pageSize}`,
+    ),
+  listExtractedImages: (page = 1, pageSize = 10) =>
+    request<Page<ExtractedImage>>(`/batches/images/extracted?page=${page}&page_size=${pageSize}`),
   batchImageUrl: (batchId: number, imageId: number) =>
     blobUrl(`/batches/${batchId}/images/${imageId}`),
   retryItem: (batchId: number, itemId: number) =>

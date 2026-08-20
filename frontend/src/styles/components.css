@@ -28,7 +28,7 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
-  color: var(--vc-orange);
+  color: var(--vc-heading);
 }
 
 .avatar {

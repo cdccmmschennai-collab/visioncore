@@ -76,6 +76,15 @@ export interface Batch {
   items: BatchItem[]
 }
 
+export interface ExtractedImage {
+  id: number
+  original_filename: string
+  tag_number: string
+  batch_reference: string
+  status: ItemStatus
+  created_at: string
+}
+
 export interface RejectedFile {
   filename: string
   reason: string

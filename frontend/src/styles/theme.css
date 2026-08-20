@@ -26,6 +26,10 @@
   --vc-muted: #8b949e;
   --vc-faint: #626c76;
 
+  /* Headings/eyebrow/logo text: white in dark mode for readability against
+     the dark background, where the brand purple loses too much contrast. */
+  --vc-heading: var(--vc-text);
+
   --vc-orange: #8a4a90;
   --vc-orange-bright: #a868af;
   --vc-orange-dim: #5b2a5f;
@@ -78,6 +82,9 @@
   --vc-text-dim: #3c454f;
   --vc-muted: #5c6875;
   --vc-faint: #8b96a2;
+
+  /* Light theme keeps the brand purple for headings/eyebrow/logo text. */
+  --vc-heading: var(--vc-orange);
 
   --vc-orange: #5b2a5f;
   --vc-orange-bright: #7a3f80;
