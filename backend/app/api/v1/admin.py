@@ -1,10 +1,10 @@
 """Admin-only: user management and the Claude usage dashboard."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import Date, Integer, cast, func, select
+from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.deps import AdminUser, DbSession
@@ -12,15 +12,27 @@ from app.core.security import hash_password
 from app.models import (
     Activity,
     ActivityAction,
-    ApiUsage,
     AssetTag,
     Batch,
+    OrgCredits,
     User,
     UserRole,
 )
-from app.schemas.admin import AdminStats, UsageDaily, UsageSummary
+from app.schemas.admin import (
+    AdminStats,
+    ClaudeModelUsage,
+    ClaudeUsageDaily,
+    ClaudeUsageSummary,
+    OrgCreditsOut,
+    OrgCreditsUpdate,
+)
 from app.schemas.auth import AdminPasswordReset, UserCreate, UserOut, UserUpdate
 from app.schemas.common import Message
+from app.services.anthropic_usage import (
+    UNAVAILABLE_METRICS,
+    ClaudeUsageUnavailable,
+    fetch_claude_usage_report,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -111,71 +123,100 @@ async def deactivate_user(user_id: int, admin: AdminUser, db: DbSession) -> Mess
     return Message(message=f"{user.username} has been disabled.")
 
 
-# Usage dashboard 
+# Claude usage dashboard — sourced entirely from Anthropic's official
+# Usage & Cost Admin API. No local PostgreSQL usage records are read here.
 
-@router.get("/usage", response_model=UsageSummary)
+@router.get("/usage", response_model=ClaudeUsageSummary)
 async def usage(
-    admin: AdminUser, db: DbSession, days: int = Query(30, ge=1, le=365)
-) -> UsageSummary:
-    """Token and spend totals measured from recorded API calls.
+    admin: AdminUser, days: int = Query(30, ge=1, le=31)
+) -> ClaudeUsageSummary:
+    """Claude token/cost usage as reported by Anthropic's Usage & Cost API.
 
-    Anthropic exposes no balance endpoint, so this is spend *measured* from each
-    response's usage block and priced with the configured rates — not a figure
-    read back from the account.
+    `days` is capped at 31 — that's the API's own maximum window at daily
+    granularity. Returns `available=False` with a reason (never fabricated
+    numbers) when the Admin API key is missing or the request fails.
     """
-    totals = (await db.execute(
-        select(
-            func.count(ApiUsage.id),
-            func.coalesce(func.sum(ApiUsage.input_tokens), 0),
-            func.coalesce(func.sum(ApiUsage.output_tokens), 0),
-            func.coalesce(func.sum(ApiUsage.cost_usd), 0.0),
-            func.coalesce(func.avg(ApiUsage.latency_ms), 0),
-            func.coalesce(func.sum(cast(ApiUsage.success, Integer)), 0),
+    now = datetime.now(timezone.utc)
+    rate = settings.usd_to_inr_rate
+    threshold = settings.claude_spend_warning_usd
+    try:
+        result = await fetch_claude_usage_report(days)
+    except ClaudeUsageUnavailable as exc:
+        return ClaudeUsageSummary(
+            available=False, error=str(exc), generated_at=now, window_days=days,
+            configured_model=settings.claude_model,
+            input_tokens=0, output_tokens=0, total_tokens=0, total_cost_usd=0.0,
+            total_cost_inr=0.0, usd_to_inr_rate=rate,
+            by_model=[], daily=[], unavailable_metrics=UNAVAILABLE_METRICS,
+            spend_warning_threshold_usd=threshold, spend_warning_triggered=False,
         )
-    )).one()
-    calls, in_tokens, out_tokens, cost, avg_latency, successes = totals
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    daily_rows = (await db.execute(
-        select(
-            cast(ApiUsage.created_at, Date).label("day"),
-            func.coalesce(func.sum(ApiUsage.input_tokens), 0),
-            func.coalesce(func.sum(ApiUsage.output_tokens), 0),
-            func.coalesce(func.sum(ApiUsage.cost_usd), 0.0),
-            func.count(ApiUsage.id),
-        )
-        .where(ApiUsage.created_at >= since)
-        .group_by(cast(ApiUsage.created_at, Date))
-        .order_by(cast(ApiUsage.created_at, Date))
-    )).all()
-
-    budget = settings.claude_credit_budget_usd
-    spent = float(cost or 0.0)
-
-    return UsageSummary(
-        model=settings.claude_model,
-        total_calls=int(calls or 0),
-        successful_calls=int(successes or 0),
-        failed_calls=int((calls or 0) - (successes or 0)),
-        input_tokens=int(in_tokens or 0),
-        output_tokens=int(out_tokens or 0),
-        total_tokens=int((in_tokens or 0) + (out_tokens or 0)),
-        total_cost_usd=round(spent, 4),
-        credit_budget_usd=budget,
-        remaining_usd=round(max(0.0, budget - spent), 4),
-        percent_used=round(min(100.0, (spent / budget * 100) if budget else 0.0), 2),
-        avg_latency_ms=int(avg_latency or 0),
-        input_price_per_mtok=settings.claude_input_price_per_mtok,
-        output_price_per_mtok=settings.claude_output_price_per_mtok,
-        daily=[
-            UsageDaily(
-                day=datetime.combine(day, datetime.min.time()),
-                input_tokens=int(i), output_tokens=int(o),
-                cost_usd=round(float(c), 6), calls=int(n),
+    spent = round(result.total_cost_usd, 4)
+    return ClaudeUsageSummary(
+        available=True, error=None, generated_at=now, window_days=days,
+        configured_model=settings.claude_model,
+        input_tokens=result.total_input_tokens,
+        output_tokens=result.total_output_tokens,
+        total_tokens=result.total_input_tokens + result.total_output_tokens,
+        total_cost_usd=spent,
+        total_cost_inr=round(spent * rate, 2), usd_to_inr_rate=rate,
+        by_model=[
+            ClaudeModelUsage(
+                model=m.model, input_tokens=m.input_tokens, output_tokens=m.output_tokens,
+                total_tokens=m.input_tokens + m.output_tokens,
             )
-            for day, i, o, c, n in daily_rows
+            for m in result.by_model
         ],
+        daily=[
+            ClaudeUsageDaily(
+                day=datetime.combine(d.day, datetime.min.time()),
+                input_tokens=d.input_tokens, output_tokens=d.output_tokens,
+                total_tokens=d.input_tokens + d.output_tokens,
+                cost_usd=round(d.cost_usd, 6),
+            )
+            for d in result.daily
+        ],
+        unavailable_metrics=UNAVAILABLE_METRICS,
+        spend_warning_threshold_usd=threshold, spend_warning_triggered=spent >= threshold,
     )
+
+
+# Organization credit balance — Anthropic's official API has no endpoint for
+# this on Claude Console/Platform orgs, so it is never fetched or computed.
+# An admin enters what the Claude Console's Billing page shows; it's stored
+# and displayed as-is (plus an INR conversion) until next updated.
+
+def _org_credits_out(row: OrgCredits | None) -> OrgCreditsOut:
+    rate = settings.usd_to_inr_rate
+    if row is None:
+        return OrgCreditsOut(amount_usd=None, amount_inr=None, usd_to_inr_rate=rate, updated_at=None)
+    return OrgCreditsOut(
+        amount_usd=row.amount_usd,
+        amount_inr=round(row.amount_usd * rate, 2),
+        usd_to_inr_rate=rate,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/org-credits", response_model=OrgCreditsOut)
+async def get_org_credits(admin: AdminUser, db: DbSession) -> OrgCreditsOut:
+    return _org_credits_out(await db.get(OrgCredits, 1))
+
+
+@router.patch("/org-credits", response_model=OrgCreditsOut)
+async def set_org_credits(
+    body: OrgCreditsUpdate, admin: AdminUser, db: DbSession
+) -> OrgCreditsOut:
+    row = await db.get(OrgCredits, 1)
+    if row is None:
+        row = OrgCredits(id=1, amount_usd=body.amount_usd, updated_by_user_id=admin.id)
+        db.add(row)
+    else:
+        row.amount_usd = body.amount_usd
+        row.updated_by_user_id = admin.id
+    await db.commit()
+    await db.refresh(row)
+    return _org_credits_out(row)
 
 
 @router.get("/stats", response_model=AdminStats)

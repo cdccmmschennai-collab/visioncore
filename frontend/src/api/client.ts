@@ -1,8 +1,8 @@
 import { API_V1 } from '@/config'
 import type { StagedFile } from '@/utils/upload'
 import type {
-  AdminStats, AssetTag, Batch, BatchItem, ExtractedImage, ExtractionPayload, HistoryRow,
-  Page, TokenResponse, UploadResponse, UsageSummary, User,
+  AdminStats, AssetTag, Batch, BatchItem, ClaudeUsageSummary, ExtractedImage, ExtractionPayload,
+  HistoryRow, OrgCredits, Page, TokenResponse, UploadResponse, User,
 } from './types'
 
 const ACCESS_KEY = 'visioncore.access'
@@ -247,6 +247,9 @@ export const api = {
     }),
   deactivateUser: (id: number) =>
     request<{ message: string }>(`/admin/users/${id}`, { method: 'DELETE' }),
-  usage: (days = 30) => request<UsageSummary>(`/admin/usage?days=${days}`),
+  usage: (days = 30) => request<ClaudeUsageSummary>(`/admin/usage?days=${days}`),
+  orgCredits: () => request<OrgCredits>('/admin/org-credits'),
+  setOrgCredits: (amount_usd: number) =>
+    request<OrgCredits>('/admin/org-credits', { method: 'PATCH', body: { amount_usd } }),
   stats: () => request<AdminStats>('/admin/stats'),
 }

@@ -86,8 +86,14 @@ async def download_all_templates(user: CurrentUser, db: DbSession) -> Response:
     Reads from AssetTag (unique on tag_number) rather than the Activity log,
     so the export can't contain duplicate rows for a tag that was uploaded,
     edited or downloaded more than once.
+
+    Scoped the same way as `list_tags` above: non-admins only ever get tags
+    they personally extracted (`created_by_id`); admins get every tag.
     """
-    tags = (await db.scalars(select(AssetTag).order_by(AssetTag.tag_number))).all()
+    query = select(AssetTag).order_by(AssetTag.tag_number)
+    if user.role != UserRole.ADMIN:
+        query = query.where(AssetTag.created_by_id == user.id)
+    tags = (await db.scalars(query)).all()
     if not tags:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No extracted tags to export yet.")
 
