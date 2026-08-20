@@ -14,3 +14,4 @@ storage/
 !.vscode/extensions.json
 .idea/
 .env.local
+.env
