@@ -8,9 +8,9 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -26,10 +26,12 @@ from app.models import (
     TagImage,
     UserRole,
 )
+from app.schemas.common import Page
 from app.schemas.tag import (
     AssetTagOut,
     BatchItemOut,
     BatchOut,
+    ExtractedImageOut,
     ImageOut,
     RejectedFile,
     SaveTagRequest,
@@ -44,7 +46,7 @@ from app.services.filename_parser import (
     parse_folder_name,
     safe_filename,
 )
-from app.services.pipeline import generate_workbooks, process_batch
+from app.services.pipeline import generate_workbooks, process_batch, reextract_item
 from app.services.storage import ai_output_name, resolve_stored, save_upload, template_output_name
 
 router = APIRouter(prefix="/batches", tags=["batches"])
@@ -279,10 +281,119 @@ async def upload(
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
 
 
+@router.get("/by-status", response_model=Page[BatchOut])
+async def list_batches_by_status(
+    user: CurrentUser,
+    db: DbSession,
+    status_filter: str = Query(..., alias="status", pattern="^(completed|failed)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+) -> Page[BatchOut]:
+    """Backs the Home page's Completed/Failed Batch drill-down.
+
+    "failed" also includes partial batches (some tags failed), matching the
+    Home page's existing Failed Batches KPI definition.
+    """
+    statuses = (
+        [BatchStatus.COMPLETED] if status_filter == "completed"
+        else [BatchStatus.FAILED, BatchStatus.PARTIAL]
+    )
+    query = (
+        select(Batch)
+        .options(
+            selectinload(Batch.items).selectinload(BatchItem.images),
+            selectinload(Batch.items).selectinload(BatchItem.asset_tag),
+        )
+        .where(Batch.status.in_(statuses))
+        .order_by(Batch.created_at.desc())
+    )
+    count_query = select(func.count()).select_from(Batch).where(Batch.status.in_(statuses))
+
+    if user.role != UserRole.ADMIN:
+        query = query.where(Batch.user_id == user.id)
+        count_query = count_query.where(Batch.user_id == user.id)
+
+    total = await db.scalar(count_query) or 0
+    rows = (
+        await db.scalars(query.offset((page - 1) * page_size).limit(page_size))
+    ).all()
+    return Page[BatchOut](
+        items=[_batch_out(b) for b in rows], total=total, page=page, page_size=page_size
+    )
+
+
+
+@router.get("/images/extracted", response_model=Page[ExtractedImageOut])
+async def list_extracted_images(
+    user: CurrentUser,
+    db: DbSession,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+) -> Page[ExtractedImageOut]:
+    """Backs the Home page's Total Images Extracted drill-down.
+
+    Every uploaded image, newest first, with its parent tag's current status —
+    an image doesn't carry its own status, only the tag (BatchItem) it belongs
+    to does.
+    """
+    query = (
+        select(TagImage, BatchItem.tag_number, BatchItem.status, Batch.reference)
+        .join(BatchItem, BatchItem.id == TagImage.item_id)
+        .join(Batch, Batch.id == BatchItem.batch_id)
+        .order_by(TagImage.created_at.desc())
+    )
+    count_query = (
+        select(func.count())
+        .select_from(TagImage)
+        .join(BatchItem, BatchItem.id == TagImage.item_id)
+        .join(Batch, Batch.id == BatchItem.batch_id)
+    )
+    if user.role != UserRole.ADMIN:
+        query = query.where(Batch.user_id == user.id)
+        count_query = count_query.where(Batch.user_id == user.id)
+
+    total = await db.scalar(count_query) or 0
+    rows = (
+        await db.execute(query.offset((page - 1) * page_size).limit(page_size))
+    ).all()
+    items = [
+        ExtractedImageOut(
+            id=image.id,
+            original_filename=image.original_filename,
+            tag_number=tag_number,
+            batch_reference=reference,
+            status=item_status,
+            created_at=image.created_at,
+        )
+        for image, tag_number, item_status, reference in rows
+    ]
+    return Page[ExtractedImageOut](items=items, total=total, page=page, page_size=page_size)
+
+
 @router.get("/{batch_id}", response_model=BatchOut)
 async def get_batch(batch_id: int, user: CurrentUser, db: DbSession) -> BatchOut:
     """Polled by the UI while the status rail advances."""
     return _batch_out(await _load_batch(db, batch_id, user))
+
+
+@router.post("/{batch_id}/items/{item_id}/retry", response_model=BatchItemOut)
+async def retry_item(
+    batch_id: int, item_id: int, user: CurrentUser, db: DbSession, background: BackgroundTasks
+) -> BatchItemOut:
+    """Re-extract one failed tag in place — no new batch, tag, or image rows."""
+    batch = await _load_batch(db, batch_id, user)
+    item = next((i for i in batch.items if i.id == item_id), None)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That tag isn't part of this batch.")
+    if item.status != ItemStatus.FAILED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only a failed tag can be retried.")
+
+    item.status = ItemStatus.UPLOADED
+    batch.status = BatchStatus.PROCESSING
+    await db.commit()
+
+    background.add_task(reextract_item, item.id, batch.id, user.id)
+    return _item_out(item)
 
 
 @router.get("/{batch_id}/images/{image_id}")

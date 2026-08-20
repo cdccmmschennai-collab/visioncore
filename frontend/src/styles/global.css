@@ -22,7 +22,7 @@ h1, h2, h3, h4 {
   letter-spacing: 0.02em;
   margin: 0;
   text-transform: uppercase;
-  color: var(--vc-orange);
+  color: var(--vc-heading);
 }
 h1 { font-size: 30px; }
 h2 { font-size: 22px; }
@@ -49,7 +49,7 @@ a:hover { text-decoration: underline; }
   font-size: 12px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--vc-orange);
+  color: var(--vc-heading);
 }
 /* Tag numbers are codes, so they are set as codes. */
 .tag-code {
@@ -197,6 +197,16 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--vc-line-soft);
   border-radius: var(--vc-radius);
   background: var(--vc-surface);
+}
+
+/* Dark theme only: lift cards and the table surface off the page background
+   with a lighter fill, a visible edge, and a soft shadow, so they read as
+   distinct panels instead of blending into it. Light theme is untouched. */
+:root:not([data-theme='light']) .card,
+:root:not([data-theme='light']) .table-wrap {
+  background: #21262c;
+  border-color: var(--vc-line);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.data thead th {

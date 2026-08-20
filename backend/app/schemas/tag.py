@@ -28,6 +28,16 @@ class ImageOut(ORMModel):
     size_bytes: int
 
 
+class ExtractedImageOut(BaseModel):
+    """One row in the Home page's Total Images Extracted drill-down."""
+    id: int
+    original_filename: str
+    tag_number: str
+    batch_reference: str
+    status: ItemStatus
+    created_at: datetime
+
+
 class AssetTagOut(ORMModel):
     id: int
     tag_number: str

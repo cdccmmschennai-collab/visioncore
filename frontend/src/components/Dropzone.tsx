@@ -182,7 +182,7 @@ const Dropzone = forwardRef<DropzoneHandle, Props>(function Dropzone(
         </p>
         <p className="dropzone-hint">
           Up to {LIMITS.maxImagesPerBatch} images across {LIMITS.maxTagsPerBatch} tags,
-          {' '}{LIMITS.maxImagesPerTag} photos per tag, {LIMITS.maxImageSizeMb} MB each
+          {' '} 2 photos per tag, {LIMITS.maxImageSizeMb} MB each
         </p>
         <p className="dropzone-format">
           Name files like <code>12-4020-BV-0074-BALL VALVE.jpg</code>, or name each subfolder

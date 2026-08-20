@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import BatchImagesModal from '@/components/BatchImagesModal'
 import Dropzone, { type DropzoneHandle } from '@/components/Dropzone'
 import EditableTable from '@/components/EditableTable'
 import Spinner from '@/components/Spinner'
@@ -7,6 +8,7 @@ import StatusRail from '@/components/StatusRail'
 import { api } from '@/api/client'
 import type { AssetTag, Batch, ExtractionPayload, ItemStatus, RejectedFile } from '@/api/types'
 import { LIMITS } from '@/config'
+import { formatFileSize } from '@/utils/filename'
 import { stagedGroup, type StagedFile } from '@/utils/upload'
 import { useToast } from '@/store/ToastContext'
 
@@ -27,14 +29,22 @@ const STAGE_FRACTION: Record<ItemStatus, number> = {
 export default function NewBatch() {
   const toast = useToast()
   const navigate = useNavigate()
+  const location = useLocation()
   const { batchId: batchIdParam } = useParams()
   const viewingExisting = Boolean(batchIdParam)
+  // Set only by the "New Batch" button, so a blank screen is opt-in — every
+  // other way of landing on /batch (nav tab, browser back, a bookmark)
+  // should default to showing the latest extraction instead.
+  const cameFresh = Boolean((location.state as { fresh?: boolean } | null)?.fresh)
   const [files, setFiles] = useState<StagedFile[]>([])
   const [uploading, setUploading] = useState(false)
-  const [loadingBatch, setLoadingBatch] = useState(viewingExisting)
+  const [loadingBatch, setLoadingBatch] = useState(viewingExisting || !cameFresh)
   const [batch, setBatch] = useState<Batch | null>(null)
   const [rejected, setRejected] = useState<RejectedFile[]>([])
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set())
+  const [viewingBatchId, setViewingBatchId] = useState<number | null>(null)
+  const [viewingItemId, setViewingItemId] = useState<number | null>(null)
+  const [retryingIds, setRetryingIds] = useState<Set<number>>(new Set())
   const pollRef = useRef<number | null>(null)
   const dropzoneRef = useRef<DropzoneHandle>(null)
 
@@ -64,6 +74,17 @@ export default function NewBatch() {
         try {
           const fresh = await api.getBatch(batchId)
           setBatch(fresh)
+          // A retried item is done once it leaves the active pipeline states.
+          setRetryingIds((prev) => {
+            if (prev.size === 0) return prev
+            const stillActive = new Set(
+              fresh.items
+                .filter((item) => item.status === 'uploaded' || item.status === 'extracting' || item.status === 'processing')
+                .map((item) => item.id),
+            )
+            const next = new Set([...prev].filter((id) => stillActive.has(id)))
+            return next.size === prev.size ? prev : next
+          })
           if (TERMINAL.has(fresh.status)) {
             stopPolling()
             const failures = fresh.items.filter((item) => item.status === 'failed').length
@@ -79,6 +100,23 @@ export default function NewBatch() {
     [stopPolling, toast],
   )
 
+  /** Re-run extraction for one failed tag only — the rest of the batch is untouched. */
+  const retryTag = async (itemId: number) => {
+    if (!batch) return
+    setRetryingIds((prev) => new Set(prev).add(itemId))
+    try {
+      await api.retryItem(batch.id, itemId)
+      startPolling(batch.id)
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not retry that tag.')
+      setRetryingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(itemId)
+        return next
+      })
+    }
+  }
+
   // Opened from a Recent Batches row (/batch/:batchId) — load that batch's
   // details instead of showing the upload dropzone.
   useEffect(() => {
@@ -93,6 +131,24 @@ export default function NewBatch() {
         if (!TERMINAL.has(fetched.status)) startPolling(fetched.id)
       })
       .catch(() => { if (!cancelled) toast.error('Could not load that batch.') })
+      .finally(() => !cancelled && setLoadingBatch(false))
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchIdParam])
+
+  // Bare /batch, landed on normally (not via "New Batch"): default to the
+  // most recent extraction so it survives navigating away and back.
+  useEffect(() => {
+    if (batchIdParam || cameFresh) return
+    let cancelled = false
+    setLoadingBatch(true)
+    api
+      .listBatches(1)
+      .then((latest) => {
+        if (cancelled) return
+        if (latest.length > 0) navigate(`/batch/${latest[0].id}`, { replace: true })
+      })
+      .catch(() => undefined)
       .finally(() => !cancelled && setLoadingBatch(false))
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -132,6 +188,9 @@ export default function NewBatch() {
         toast.success(`Uploaded. Extracting ${pending} tag${pending === 1 ? '' : 's'}…`)
         startPolling(response.batch.id)
       }
+      // Move the URL to this batch's own address so it's what "New Batch"
+      // shows by default on the next visit — not just held in local state.
+      navigate(`/batch/${response.batch.id}`, { replace: true })
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : 'Upload failed.')
     } finally {
@@ -173,6 +232,7 @@ export default function NewBatch() {
     setBatch(null)
     setRejected([])
     setFiles([])
+    navigate('/batch', { replace: true, state: { fresh: true } })
   }
 
   const busy = batch !== null && !TERMINAL.has(batch.status)
@@ -195,26 +255,19 @@ export default function NewBatch() {
           <span className="eyebrow">{viewingExisting ? 'History' : 'Extraction'}</span>
           <h1>{viewingExisting ? 'Batch Details' : 'New Batch'}</h1>
         </div>
-        {batch && (
-          <div className="row gap-12 wrap">
-            <span className="chip chip-neutral">{batch.reference}</span>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => (viewingExisting ? navigate('/batch') : startOver())}
-              disabled={busy}
-            >
-              {viewingExisting ? 'New batch' : 'Start another batch'}
-            </button>
-          </div>
-        )}
+        <div className="row gap-12 wrap">
+          {batch && <span className="chip chip-neutral">{batch.reference}</span>}
+          <button type="button" className="btn btn-primary" onClick={startOver}>
+            New Batch
+          </button>
+        </div>
       </header>
 
       {loadingBatch && (
         <div className="card"><Spinner size={22} label="Loading batch…" /></div>
       )}
 
-      {!batch && !viewingExisting && (
+      {!batch && !viewingExisting && !loadingBatch && (
         <section className="card stack gap-16">
           <Dropzone ref={dropzoneRef} files={files} onChange={setFiles} disabled={uploading} />
           <div className="row gap-12 wrap">
@@ -301,7 +354,21 @@ export default function NewBatch() {
                   <span className="spacer" />
                   <span className="muted nowrap">
                     {item.images.length} photo{item.images.length === 1 ? '' : 's'}
+                    {' • '}
+                    {formatFileSize(item.images.reduce((sum, image) => sum + image.size_bytes, 0))}
                   </span>
+                  {item.status === 'failed'
+                    && !(item.error_message ?? '').startsWith('Excel generation failed') && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => retryTag(item.id)}
+                      disabled={retryingIds.has(item.id)}
+                    >
+                      {retryingIds.has(item.id) ? <Spinner size={14} /> : null}
+                      {retryingIds.has(item.id) ? 'Re-Extracting…' : 'Re-Extract'}
+                    </button>
+                  )}
                 </div>
 
                 <StatusRail status={item.status} />
@@ -342,6 +409,7 @@ export default function NewBatch() {
                         onSave={(payload) => saveTag(item.asset_tag!, payload)}
                         onDownloadAi={() => download(item.asset_tag!, 'ai')}
                         onDownloadTemplate={() => download(item.asset_tag!, 'template')}
+                        onViewPhoto={() => { setViewingBatchId(batch.id); setViewingItemId(item.id) }}
                       />
                     )}
                   </>
@@ -351,6 +419,12 @@ export default function NewBatch() {
           </div>
         </section>
       )}
+
+      <BatchImagesModal
+        batchId={viewingBatchId}
+        itemId={viewingItemId}
+        onClose={() => { setViewingBatchId(null); setViewingItemId(null) }}
+      />
     </div>
   )
 }

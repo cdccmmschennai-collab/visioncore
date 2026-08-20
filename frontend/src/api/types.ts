@@ -76,6 +76,15 @@ export interface Batch {
   items: BatchItem[]
 }
 
+export interface ExtractedImage {
+  id: number
+  original_filename: string
+  tag_number: string
+  batch_reference: string
+  status: ItemStatus
+  created_at: string
+}
+
 export interface RejectedFile {
   filename: string
   reason: string
@@ -109,30 +118,53 @@ export interface Page<T> {
   page_size: number
 }
 
-export interface UsageDaily {
+export interface ClaudeModelUsage {
+  model: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+}
+
+export interface ClaudeUsageDaily {
   day: string
   input_tokens: number
   output_tokens: number
+  total_tokens: number
   cost_usd: number
-  calls: number
 }
 
-export interface UsageSummary {
-  model: string
-  total_calls: number
-  successful_calls: number
-  failed_calls: number
+/** Claude usage/cost, sourced entirely from Anthropic's official Usage &
+ * Cost Admin API. When `available` is false, treat `error` as the state —
+ * the numeric/list fields are empty, not zero-as-data. */
+export interface ClaudeUsageSummary {
+  available: boolean
+  error: string | null
+  generated_at: string
+  window_days: number
+  configured_model: string
   input_tokens: number
   output_tokens: number
   total_tokens: number
   total_cost_usd: number
-  credit_budget_usd: number
-  remaining_usd: number
-  percent_used: number
-  avg_latency_ms: number
-  input_price_per_mtok: number
-  output_price_per_mtok: number
-  daily: UsageDaily[]
+  /** Pure USD -> INR display conversion of total_cost_usd — not data
+   * Anthropic returns. Always render it labeled as a conversion. */
+  total_cost_inr: number
+  usd_to_inr_rate: number
+  by_model: ClaudeModelUsage[]
+  daily: ClaudeUsageDaily[]
+  unavailable_metrics: string[]
+  spend_warning_threshold_usd: number
+  spend_warning_triggered: boolean
+}
+
+/** The organization's available Claude API credit balance — a value an
+ * admin manually entered from the Claude Console, not fetched or
+ * calculated. Null fields mean it has never been set. */
+export interface OrgCredits {
+  amount_usd: number | null
+  amount_inr: number | null
+  usd_to_inr_rate: number
+  updated_at: string | null
 }
 
 export interface AdminStats {

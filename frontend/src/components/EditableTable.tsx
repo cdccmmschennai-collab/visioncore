@@ -9,6 +9,7 @@ interface Props {
   onSave: (payload: ExtractionPayload) => Promise<void>
   onDownloadAi: () => Promise<void>
   onDownloadTemplate: () => Promise<void>
+  onViewPhoto?: () => void
   readOnly?: boolean
 }
 
@@ -29,7 +30,7 @@ function emptyField(): FieldValue {
 }
 
 export default function EditableTable({
-  tag, onSave, onDownloadAi, onDownloadTemplate, readOnly = false,
+  tag, onSave, onDownloadAi, onDownloadTemplate, onViewPhoto, readOnly = false,
 }: Props) {
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -115,6 +116,11 @@ export default function EditableTable({
             </>
           ) : (
             <>
+              {onViewPhoto && (
+                <button type="button" className="btn btn-accent" onClick={onViewPhoto}>
+                  View Photo
+                </button>
+              )}
               {!readOnly && (
                 <button type="button" className="btn" onClick={startEdit}>
                   Edit
@@ -147,10 +153,7 @@ export default function EditableTable({
         <div className="alert alert-info" style={{ marginBottom: 16 }}>
           <span aria-hidden="true">i</span>
           <span>
-            Correct anything the AI misread, then choose Save. Values you change are
-            recorded separately from the AI's original answer and appear in blue in the
-            Template workbook.
-          </span>
+            Review and correct the data if needed, then click Save. Changed values are recorded separately from the AI's original answer and appear in blue in the Template workbook.          </span>
         </div>
       )}
 
@@ -221,7 +224,7 @@ export default function EditableTable({
                         <option value="Verify">Verify</option>
                       </select>
                     ) : (
-                      <QualityChip quality={field.quality} />
+                      <QualityChip quality={field.quality} missing={isMissing} />
                     )}
                   </td>
                 </tr>

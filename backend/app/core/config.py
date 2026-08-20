@@ -38,26 +38,25 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
 
-    # ── AI provider ──────────────────────────────────────────────────────────
-    # Use "gemini" for temporary/sample testing and "claude" for production.
-    ai_provider: str = Field("claude", alias="AI_PROVIDER")
-
     # ── Claude ───────────────────────────────────────────────────────────────
     anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
     claude_model: str = Field("claude-sonnet-5", alias="CLAUDE_MODEL")
     claude_max_tokens: int = Field(4096, alias="CLAUDE_MAX_TOKENS")
     claude_input_price_per_mtok: float = Field(3.00, alias="CLAUDE_INPUT_PRICE_PER_MTOK")
     claude_output_price_per_mtok: float = Field(15.00, alias="CLAUDE_OUTPUT_PRICE_PER_MTOK")
-    claude_credit_budget_usd: float = Field(100.00, alias="CLAUDE_CREDIT_BUDGET_USD")
-
-     # ── Gemini (temporary/sample provider) ──────────────────────────────────
-    gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
-    gemini_model: str = Field("gemini-3.6-flash", alias="GEMINI_MODEL")
-    gemini_max_tokens: int = Field(4096, alias="GEMINI_MAX_TOKENS")
-    # Set these to 0 when using a free-tier sample account. Update them if
-    # your Gemini plan is billed and you want accurate dashboard costs.
-    gemini_input_price_per_mtok: float = Field(0.0, alias="GEMINI_INPUT_PRICE_PER_MTOK")
-    gemini_output_price_per_mtok: float = Field(0.0, alias="GEMINI_OUTPUT_PRICE_PER_MTOK")
+    # An Admin API key (`sk-ant-admin01-...`), distinct from the regular API
+    # key above and only available to organization admins. Required for the
+    # Admin page's Claude usage dashboard, which reads exclusively from
+    # Anthropic's official Usage & Cost Admin API. Never sent to the
+    # frontend. Leave blank and the dashboard reports itself unavailable
+    # rather than showing any locally estimated figures.
+    anthropic_admin_api_key: str = Field("", alias="ANTHROPIC_ADMIN_API_KEY")
+    # Pure display conversion of Anthropic's official USD spend — never sent
+    # to Anthropic, never treated as data Anthropic returned.
+    usd_to_inr_rate: float = Field(83.00, alias="USD_TO_INR_RATE")
+    # Spend warning shown on the Admin page once official USD spend reaches
+    # this threshold. Based only on Anthropic's official cost report.
+    claude_spend_warning_usd: float = Field(5.00, alias="CLAUDE_SPEND_WARNING_USD")
 
     # ── Uploads ──────────────────────────────────────────────────────────────
     storage_dir: str = Field("./storage", alias="STORAGE_DIR")

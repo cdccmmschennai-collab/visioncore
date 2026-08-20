@@ -7,7 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession
-from app.models import Activity, ActivityAction, AssetTag, BatchItem, TagImage
+from app.models import Activity, ActivityAction, AssetTag, BatchItem, TagImage, UserRole
 from app.schemas.common import Page
 from app.schemas.tag import AssetTagOut, SaveTagRequest
 from app.services.excel_template import build_template_workbook
@@ -43,9 +43,19 @@ async def list_tags(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
 ) -> Page[AssetTagOut]:
-    """Backs the 'Already Extracted Tags' card and the tag search box."""
+    """Backs the Home dashboard's totals/recent list and the tag search box.
+
+    Non-admins see only tags they personally extracted (`created_by_id`) —
+    this is what keeps a new user's dashboard at zero and stops one user's
+    totals from including work another user did on a shared tag. Admins get
+    the unscoped, org-wide view.
+    """
     query = select(AssetTag)
     count_query = select(func.count()).select_from(AssetTag)
+
+    if user.role != UserRole.ADMIN:
+        query = query.where(AssetTag.created_by_id == user.id)
+        count_query = count_query.where(AssetTag.created_by_id == user.id)
 
     if search.strip():
         pattern = f"%{search.strip()}%"
@@ -76,8 +86,14 @@ async def download_all_templates(user: CurrentUser, db: DbSession) -> Response:
     Reads from AssetTag (unique on tag_number) rather than the Activity log,
     so the export can't contain duplicate rows for a tag that was uploaded,
     edited or downloaded more than once.
+
+    Scoped the same way as `list_tags` above: non-admins only ever get tags
+    they personally extracted (`created_by_id`); admins get every tag.
     """
-    tags = (await db.scalars(select(AssetTag).order_by(AssetTag.tag_number))).all()
+    query = select(AssetTag).order_by(AssetTag.tag_number)
+    if user.role != UserRole.ADMIN:
+        query = query.where(AssetTag.created_by_id == user.id)
+    tags = (await db.scalars(query)).all()
     if not tags:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No extracted tags to export yet.")
 

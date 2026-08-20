@@ -1,8 +1,8 @@
 import { API_V1 } from '@/config'
 import type { StagedFile } from '@/utils/upload'
 import type {
-  AdminStats, AssetTag, Batch, ExtractionPayload, HistoryRow,
-  Page, TokenResponse, UploadResponse, UsageSummary, User,
+  AdminStats, AssetTag, Batch, BatchItem, ClaudeUsageSummary, ExtractedImage, ExtractionPayload,
+  HistoryRow, OrgCredits, Page, TokenResponse, UploadResponse, User,
 } from './types'
 
 const ACCESS_KEY = 'visioncore.access'
@@ -187,8 +187,16 @@ export const api = {
   getBatch: (id: number, signal?: AbortSignal) =>
     request<Batch>(`/batches/${id}`, { signal }),
   listBatches: (limit = 20) => request<Batch[]>(`/batches?limit=${limit}`),
+  listBatchesByStatus: (statusFilter: 'completed' | 'failed', page = 1, pageSize = 10) =>
+    request<Page<Batch>>(
+      `/batches/by-status?status=${statusFilter}&page=${page}&page_size=${pageSize}`,
+    ),
+  listExtractedImages: (page = 1, pageSize = 10) =>
+    request<Page<ExtractedImage>>(`/batches/images/extracted?page=${page}&page_size=${pageSize}`),
   batchImageUrl: (batchId: number, imageId: number) =>
     blobUrl(`/batches/${batchId}/images/${imageId}`),
+  retryItem: (batchId: number, itemId: number) =>
+    request<BatchItem>(`/batches/${batchId}/items/${itemId}/retry`, { method: 'POST' }),
 
   // ── tags ────────────────────────────────────────────────────────────────
   listTags: (search = '', page = 1, pageSize = 25) =>
@@ -239,6 +247,9 @@ export const api = {
     }),
   deactivateUser: (id: number) =>
     request<{ message: string }>(`/admin/users/${id}`, { method: 'DELETE' }),
-  usage: (days = 30) => request<UsageSummary>(`/admin/usage?days=${days}`),
+  usage: (days = 30) => request<ClaudeUsageSummary>(`/admin/usage?days=${days}`),
+  orgCredits: () => request<OrgCredits>('/admin/org-credits'),
+  setOrgCredits: (amount_usd: number) =>
+    request<OrgCredits>('/admin/org-credits', { method: 'PATCH', body: { amount_usd } }),
   stats: () => request<AdminStats>('/admin/stats'),
 }

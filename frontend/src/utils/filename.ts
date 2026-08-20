@@ -6,6 +6,15 @@
  */
 const SUPPORTED = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.jfif']
 const COPY_SUFFIX = /\s*(?:\(\d+\)|[-_ ]cop(?:y|ie)\d*)\s*$/i
+// A space, comma or underscore directly after a digit is acting as the
+// boundary between the tag number's numeric tail and the description (e.g.
+// "1067 FIRE...", "1001,TEMPERATURE ELEMENT" or "1001_ELECTRONIC..."), so
+// treat it as a segment break there, same as a hyphen. Elsewhere a comma is
+// literal punctuation inside the description ("VALVE,GATE") and an
+// underscore is a plain space substitute ("BALL_VALVE") — both left alone;
+// a plain space elsewhere is already description-internal word-spacing
+// ("BALL VALVE") and needs no special handling.
+const TAG_BOUNDARY_SEP = /(?<=\d)[,_ ]\s*/g
 
 export interface ParsedName {
   tagNumber: string
@@ -14,15 +23,23 @@ export interface ParsedName {
   reason?: string
 }
 
+/**
+ * A description segment reads as words, not as a tag code. Only a segment
+ * containing a space, comma or slash counts here — a bare alphabetic segment
+ * ("lJBF", "TIT") is still a plausible tag code no matter how long it is, so
+ * it's only ever treated as a description when it's the *last* segment (see
+ * the fallback below). Otherwise a 4+ letter tag code sitting mid-sequence
+ * would be misread as the start of the description.
+ */
 function looksLikeDescription(segment: string): boolean {
   const s = segment.trim()
   if (!s) return false
-  if (s.includes(' ') || s.includes(',') || s.includes('/')) return true
-  return /^[A-Za-z]+$/.test(s) && s.length >= 4
+  return s.includes(' ') || s.includes(',') || s.includes('/')
 }
 
 function splitTagDescription(stem: string, example: string): ParsedName {
   const cleaned = stem
+    .replace(TAG_BOUNDARY_SEP, '-')
     .replace(/_/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -93,4 +110,17 @@ export function formatDateTime(iso: string): { date: string; time: string } {
 
 export function formatNumber(value: number): string {
   return value.toLocaleString()
+}
+
+/** Adaptive KB/MB/GB display for an actual byte count — never estimated. */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(1)} ${units[unitIndex]}`
 }

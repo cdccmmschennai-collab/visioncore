@@ -1,4 +1,5 @@
 services:
+
   db:
     image: postgres:16-alpine
     container_name: visioncore-db
@@ -10,7 +11,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       # -q keeps the readiness probe out of the container logs
       test: ["CMD-SHELL", "pg_isready -q -U ${POSTGRES_USER:-visioncore} -d ${POSTGRES_DB:-visioncore}"]
