@@ -143,11 +143,20 @@ export default function Home() {
     <div className="page stack gap-24">
       <header className="page-head">
         <div className="stack gap-4">
-          
+          <h2 style={{
+    color: '#6B2C6B',
+    fontSize: '24px',
+    fontWeight: '700',
+    textAlign: 'center',
+  }}>NAMEPLATE DATA MIGRATION</h2>
           <h3>Workbook jobs</h3>
           <p>Upload and manage equipment specification workbooks.</p>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => navigate('/batch')}>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => navigate('/batch', { state: { fresh: true } })}
+        >
           + New Batch
         </button>
       </header>

@@ -7,6 +7,7 @@ import History from '@/pages/History'
 import Home from '@/pages/Home'
 import Login from '@/pages/Login'
 import NewBatch from '@/pages/NewBatch'
+import Search from '@/pages/Search'
 import Settings from '@/pages/Settings'
 import { AuthProvider } from '@/store/AuthContext'
 import { ThemeProvider } from '@/store/ThemeContext'
@@ -32,6 +33,7 @@ export default function App() {
                 <Route path="/batch" element={<NewBatch />} />
                 <Route path="/batch/:batchId" element={<NewBatch />} />
                 <Route path="/history" element={<History />} />
+                <Route path="/search" element={<Search />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route
                   path="/admin"

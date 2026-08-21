@@ -48,18 +48,28 @@ class ClaudeUsageSummary(BaseModel):
 
 
 class OrgCreditsOut(BaseModel):
-    """The organization's available Claude API credit balance — a value an
-    admin manually entered from the Claude Console, not fetched or
-    calculated. `None` fields mean it has never been set.
+    """Estimated Organization Credits: total purchased minus Anthropic's own
+    reported usage, tracked in a ledger (see services/org_credits.py) so the
+    estimate survives Anthropic's Cost API's ~31-day reporting window. This
+    is a calculated estimate, never Anthropic's own account balance — no
+    such balance endpoint exists. `estimated_balance_*` are `None` only when
+    no credits have ever been recorded.
     """
-    amount_usd: float | None
-    amount_inr: float | None
+    total_purchased_usd: float
+    tracked_usage_usd: float
+    estimated_balance_usd: float | None
+    estimated_balance_inr: float | None
     usd_to_inr_rate: float
     updated_at: datetime | None
+    #: Set when today's latest Anthropic usage couldn't be fetched — the
+    #: estimate shown is still the last successfully tracked one, not fake
+    #: or zeroed data.
+    usage_error: str | None = None
 
 
-class OrgCreditsUpdate(BaseModel):
-    amount_usd: float = Field(ge=0)
+class OrgCreditsTopUp(BaseModel):
+    """A credit purchase/top-up — added to the running total, never overwrites it."""
+    top_up_usd: float = Field(gt=0)
 
 
 class AdminStats(BaseModel):

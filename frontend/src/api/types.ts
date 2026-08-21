@@ -46,6 +46,8 @@ export interface AssetTag {
   has_template_excel: boolean
   created_at: string
   updated_at: string
+  /** Username of the user who extracted this tag; null if unattributed. */
+  username: string | null
 }
 
 export interface TagImage {
@@ -94,6 +96,23 @@ export interface UploadResponse {
   batch: Batch
   rejected: RejectedFile[]
   duplicates: AssetTag[]
+}
+
+/** Dropdown options for the Search page — value is the key the backend expects. */
+export const SEARCH_FIELDS: { value: string; label: string }[] = [
+  { value: 'TAG NUMBER', label: 'TAG NUMBER' },
+  { value: 'EQUIPMENT DESCRIPTION', label: 'EQUIPMENT DESCRIPTION' },
+  { value: 'SIZE/DIMENSION', label: 'SIZE/DIMENSION' },
+  { value: 'MAKE (ASSET)', label: 'MAKE (ASSET)' },
+  { value: 'MODEL', label: 'MODEL' },
+  { value: 'SERIAL NO', label: 'SERIAL NO' },
+  { value: 'PART NO', label: 'PART NO' },
+  { value: 'COUNTRY', label: 'COUNTRY' },
+]
+
+export interface SearchResult extends AssetTag {
+  batch_id: number | null
+  batch_item_id: number | null
 }
 
 export interface HistoryRow {
@@ -157,14 +176,21 @@ export interface ClaudeUsageSummary {
   spend_warning_triggered: boolean
 }
 
-/** The organization's available Claude API credit balance — a value an
- * admin manually entered from the Claude Console, not fetched or
- * calculated. Null fields mean it has never been set. */
+/** Estimated Organization Credits: total purchased minus Anthropic's own
+ * reported usage, tracked in a ledger so the estimate survives Anthropic's
+ * Cost API's ~31-day reporting window. A calculated estimate, never
+ * Anthropic's own account balance — no such balance endpoint exists.
+ * `estimated_balance_*` are null only when no credits have ever been recorded. */
 export interface OrgCredits {
-  amount_usd: number | null
-  amount_inr: number | null
+  total_purchased_usd: number
+  tracked_usage_usd: number
+  estimated_balance_usd: number | null
+  estimated_balance_inr: number | null
   usd_to_inr_rate: number
   updated_at: string | null
+  /** Set when today's latest Anthropic usage couldn't be fetched — the
+   * estimate shown is still the last successfully tracked one. */
+  usage_error: string | null
 }
 
 export interface AdminStats {

@@ -24,7 +24,7 @@ from app.schemas.admin import (
     ClaudeUsageDaily,
     ClaudeUsageSummary,
     OrgCreditsOut,
-    OrgCreditsUpdate,
+    OrgCreditsTopUp,
 )
 from app.schemas.auth import AdminPasswordReset, UserCreate, UserOut, UserUpdate
 from app.schemas.common import Message
@@ -33,6 +33,7 @@ from app.services.anthropic_usage import (
     ClaudeUsageUnavailable,
     fetch_claude_usage_report,
 )
+from app.services.org_credits import advance_usage_ledger
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -181,42 +182,70 @@ async def usage(
     )
 
 
-# Organization credit balance — Anthropic's official API has no endpoint for
-# this on Claude Console/Platform orgs, so it is never fetched or computed.
-# An admin enters what the Claude Console's Billing page shows; it's stored
-# and displayed as-is (plus an INR conversion) until next updated.
+# Organization Credits — Estimated Balance = total purchased credits minus
+# Anthropic's own reported usage. Anthropic's official API still has no
+# endpoint for the account's actual balance, so an admin records what was
+# purchased (as top-ups, never overwritten), and the app tracks Anthropic's
+# real usage against it via services/org_credits.py. Never Anthropic's own
+# balance figure — always labelled "Estimated" to the admin.
 
-def _org_credits_out(row: OrgCredits | None) -> OrgCreditsOut:
+def _org_credits_out(
+    row: OrgCredits | None, tracked_usage_usd: float = 0.0, usage_error: str | None = None
+) -> OrgCreditsOut:
     rate = settings.usd_to_inr_rate
     if row is None:
-        return OrgCreditsOut(amount_usd=None, amount_inr=None, usd_to_inr_rate=rate, updated_at=None)
+        return OrgCreditsOut(
+            total_purchased_usd=0.0, tracked_usage_usd=0.0,
+            estimated_balance_usd=None, estimated_balance_inr=None,
+            usd_to_inr_rate=rate, updated_at=None, usage_error=usage_error,
+        )
+    estimated = row.total_purchased_usd - tracked_usage_usd
     return OrgCreditsOut(
-        amount_usd=row.amount_usd,
-        amount_inr=round(row.amount_usd * rate, 2),
+        total_purchased_usd=round(row.total_purchased_usd, 2),
+        tracked_usage_usd=round(tracked_usage_usd, 2),
+        estimated_balance_usd=round(estimated, 2),
+        estimated_balance_inr=round(estimated * rate, 2),
         usd_to_inr_rate=rate,
         updated_at=row.updated_at,
+        usage_error=usage_error,
     )
 
 
 @router.get("/org-credits", response_model=OrgCreditsOut)
 async def get_org_credits(admin: AdminUser, db: DbSession) -> OrgCreditsOut:
-    return _org_credits_out(await db.get(OrgCredits, 1))
+    row = await db.get(OrgCredits, 1)
+    if row is None:
+        return _org_credits_out(None)
+    ledger = await advance_usage_ledger(row)
+    await db.commit()
+    await db.refresh(row)
+    return _org_credits_out(row, ledger.tracked_usage_usd, ledger.usage_error)
 
 
 @router.patch("/org-credits", response_model=OrgCreditsOut)
-async def set_org_credits(
-    body: OrgCreditsUpdate, admin: AdminUser, db: DbSession
+async def top_up_org_credits(
+    body: OrgCreditsTopUp, admin: AdminUser, db: DbSession
 ) -> OrgCreditsOut:
+    """Record a credit purchase — always adds to the running total.
+
+    A brand-new row starts its usage ledger "through today", so a top-up
+    only ever counts usage from the moment it's recorded onward — it never
+    retroactively deducts spend that happened before this feature was set up.
+    """
     row = await db.get(OrgCredits, 1)
     if row is None:
-        row = OrgCredits(id=1, amount_usd=body.amount_usd, updated_by_user_id=admin.id)
+        row = OrgCredits(
+            id=1, total_purchased_usd=body.top_up_usd, updated_by_user_id=admin.id,
+            ledger_usage_usd=0.0, ledger_through_date=datetime.now(timezone.utc).date(),
+        )
         db.add(row)
     else:
-        row.amount_usd = body.amount_usd
+        row.total_purchased_usd += body.top_up_usd
         row.updated_by_user_id = admin.id
+    ledger = await advance_usage_ledger(row)
     await db.commit()
     await db.refresh(row)
-    return _org_credits_out(row)
+    return _org_credits_out(row, ledger.tracked_usage_usd, ledger.usage_error)
 
 
 @router.get("/stats", response_model=AdminStats)

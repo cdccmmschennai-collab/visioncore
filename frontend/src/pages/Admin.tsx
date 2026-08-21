@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import Modal from '@/components/Modal'
 import Spinner from '@/components/Spinner'
 import { api } from '@/api/client'
@@ -31,15 +31,15 @@ export default function Admin() {
   const [usageLoading, setUsageLoading] = useState(true)
   const [usageFetchError, setUsageFetchError] = useState<string | null>(null)
 
-  // Organization Credits — a value an admin manually entered from the
-  // Claude Console (Anthropic's official API has no balance endpoint for
-  // this org type), stored in the database and editable right on the card.
+  // Organization Credits — an Estimated Balance (total purchased, entered as
+  // top-ups, minus Anthropic's own reported usage). Anthropic's official API
+  // has no balance endpoint for this org type, so the balance itself is
+  // calculated here rather than fetched — see services/org_credits.py.
   const [orgCredits, setOrgCredits] = useState<OrgCredits | null>(null)
   const [orgCreditsLoading, setOrgCreditsLoading] = useState(true)
   const [orgCreditsError, setOrgCreditsError] = useState<string | null>(null)
-  const [orgCreditsInput, setOrgCreditsInput] = useState('')
-  const [orgCreditsSaving, setOrgCreditsSaving] = useState(false)
-  const orgCreditsInputTouched = useRef(false)
+  const [topUpInput, setTopUpInput] = useState('')
+  const [topUpSaving, setTopUpSaving] = useState(false)
 
   const [createOpen, setCreateOpen] = useState(false)
   const [resetFor, setResetFor] = useState<User | null>(null)
@@ -75,11 +75,6 @@ export default function Admin() {
       const data = await api.orgCredits()
       setOrgCredits(data)
       setOrgCreditsError(null)
-      // Only prefill the edit box from the very first successful load —
-      // background refreshes shouldn't clobber an in-progress edit.
-      if (!orgCreditsInputTouched.current) {
-        setOrgCreditsInput(data.amount_usd != null ? String(data.amount_usd) : '')
-      }
     } catch (caught) {
       setOrgCreditsError(caught instanceof Error ? caught.message : 'Could not reach the backend.')
     } finally {
@@ -87,23 +82,23 @@ export default function Admin() {
     }
   }, [])
 
-  const submitOrgCredits = async (event: FormEvent) => {
+  const submitTopUp = async (event: FormEvent) => {
     event.preventDefault()
-    const parsed = Number(orgCreditsInput)
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      toast.error('Enter a valid, non-negative USD amount.')
+    const parsed = Number(topUpInput)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      toast.error('Enter a valid top-up amount greater than zero.')
       return
     }
-    setOrgCreditsSaving(true)
+    setTopUpSaving(true)
     try {
-      const data = await api.setOrgCredits(parsed)
+      const data = await api.topUpOrgCredits(parsed)
       setOrgCredits(data)
-      orgCreditsInputTouched.current = false
-      toast.success('Organization credits updated.')
+      setTopUpInput('')
+      toast.success(`Added $${parsed.toFixed(2)} in credits.`)
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : 'Could not update organization credits.')
+      toast.error(caught instanceof Error ? caught.message : 'Could not add credits.')
     } finally {
-      setOrgCreditsSaving(false)
+      setTopUpSaving(false)
     }
   }
 
@@ -315,9 +310,10 @@ export default function Admin() {
               <div className="stack gap-4">
                 <h3>Organization Credits</h3>
                 <span className="muted">
-                  Anthropic's official API has no endpoint for account credit balance on
-                  Claude Console/Platform organizations, so this isn't fetched automatically —
-                  {' '}<strong>enter what the Claude Console's Billing page shows.</strong>
+                  <strong>Estimated Balance</strong> = credits you've added below, minus
+                  Anthropic's own reported API usage (tracked automatically from the Cost
+                  report above). Anthropic's official API still has no endpoint for the
+                  account's actual balance, so this is a calculated estimate, not Anthropic's data.
                 </span>
               </div>
               <button
@@ -342,15 +338,38 @@ export default function Admin() {
 
             {orgCredits && (
               <>
+                {orgCredits.usage_error && (
+                  <div className="alert alert-error">
+                    <span aria-hidden="true">!</span>
+                    <span>
+                      Unable to refresh the latest Anthropic usage — showing the balance as of
+                      the last successful update. ({orgCredits.usage_error})
+                    </span>
+                  </div>
+                )}
+
                 <div className="stat-grid">
                   <Stat
-                    label="Available balance (USD)"
-                    value={orgCredits.amount_usd != null ? `$${orgCredits.amount_usd.toFixed(2)}` : 'Not set'}
+                    label="Estimated Balance (USD)"
+                    value={orgCredits.estimated_balance_usd != null
+                      ? `$${orgCredits.estimated_balance_usd.toFixed(2)}` : 'Not set'}
+                    tone={orgCredits.estimated_balance_usd != null && orgCredits.estimated_balance_usd < 0
+                      ? 'danger' : undefined}
                   />
                   <Stat
-                    label="Available balance (INR)"
-                    value={orgCredits.amount_inr != null ? `≈ ₹${orgCredits.amount_inr.toFixed(2)}` : 'Not set'}
+                    label="Estimated Balance (INR)"
+                    value={orgCredits.estimated_balance_inr != null
+                      ? `≈ ₹${orgCredits.estimated_balance_inr.toFixed(2)}` : 'Not set'}
                     hint={`Converted at ₹${orgCredits.usd_to_inr_rate}/$ — a display conversion, not Anthropic data`}
+                    tone={orgCredits.estimated_balance_inr != null && orgCredits.estimated_balance_inr < 0
+                      ? 'danger' : undefined}
+                  />
+                  <Stat
+                    label="Total credits added" value={`$${orgCredits.total_purchased_usd.toFixed(2)}`} small
+                  />
+                  <Stat
+                    label="Usage tracked" value={`$${orgCredits.tracked_usage_usd.toFixed(2)}`} small
+                    hint="From Anthropic's Cost report, since credits were first added"
                   />
                 </div>
 
@@ -360,21 +379,19 @@ export default function Admin() {
                   </span>
                 )}
 
-                <form onSubmit={submitOrgCredits} className="row gap-8" style={{ alignItems: 'flex-end' }}>
+                <form onSubmit={submitTopUp} className="row gap-8" style={{ alignItems: 'flex-end' }}>
                   <div className="field" style={{ flex: 1, maxWidth: 220 }}>
-                    <label htmlFor="org-credits-input">Update from Console (USD)</label>
+                    <label htmlFor="org-credits-topup">Add credits — top-up (USD)</label>
                     <input
-                      id="org-credits-input" type="number" step="0.01" min="0" className="input"
-                      value={orgCreditsInput}
-                      onChange={(event) => {
-                        orgCreditsInputTouched.current = true
-                        setOrgCreditsInput(event.target.value)
-                      }}
+                      id="org-credits-topup" type="number" step="0.01" min="0.01" className="input"
+                      placeholder="e.g. 100.00"
+                      value={topUpInput}
+                      onChange={(event) => setTopUpInput(event.target.value)}
                     />
                   </div>
-                  <button type="submit" className="btn btn-primary btn-sm" disabled={orgCreditsSaving}>
-                    {orgCreditsSaving ? <Spinner size={14} /> : null}
-                    {orgCreditsSaving ? 'Saving…' : 'Save'}
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={topUpSaving}>
+                    {topUpSaving ? <Spinner size={14} /> : null}
+                    {topUpSaving ? 'Adding…' : 'Add credits'}
                   </button>
                 </form>
               </>
