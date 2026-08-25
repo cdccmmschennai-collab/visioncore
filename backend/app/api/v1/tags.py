@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import func, or_, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import aliased, selectinload
 
 from app.core.deps import CurrentUser, DbSession
-from app.models import Activity, ActivityAction, AssetTag, BatchItem, TagImage, UserRole
+from app.models import Activity, ActivityAction, AssetTag, BatchItem, ItemStatus, TagImage, User, UserRole
 from app.schemas.common import Page
-from app.schemas.tag import AssetTagOut, SaveTagRequest
+from app.schemas.tag import AssetTagOut, SaveTagRequest, SearchResultOut
 from app.services.excel_template import build_template_workbook
 from app.services.fields import normalise_payload
 from app.services.filename_parser import excel_basename, safe_filename
@@ -21,10 +21,11 @@ router = APIRouter(prefix="/tags", tags=["tags"])
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _out(tag: AssetTag) -> AssetTagOut:
+def _out(tag: AssetTag, username: str | None = None) -> AssetTagOut:
     out = AssetTagOut.model_validate(tag)
     out.has_ai_excel = bool(tag.ai_excel_path)
     out.has_template_excel = bool(tag.template_excel_path)
+    out.username = username
     return out
 
 
@@ -33,6 +34,13 @@ async def _get_tag(db, tag_id: int) -> AssetTag:
     if tag is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "That tag no longer exists.")
     return tag
+
+
+async def _username_of(db, tag: AssetTag) -> str | None:
+    """The username of whoever extracted this specific tag (created_by_id)."""
+    if tag.created_by_id is None:
+        return None
+    return await db.scalar(select(User.username).where(User.id == tag.created_by_id))
 
 
 @router.get("", response_model=Page[AssetTagOut])
@@ -77,6 +85,108 @@ async def list_tags(
     return Page[AssetTagOut](
         items=[_out(t) for t in rows], total=total, page=page, page_size=page_size
     )
+
+
+#: Dropdown key -> AssetTag column (plain) or ExtractionPayload field key (JSONB),
+#: in the exact order the Search page's dropdown lists them.
+SEARCH_FIELDS: dict[str, str] = {
+    "TAG NUMBER": "tag_number",
+    "EQUIPMENT DESCRIPTION": "description",
+    "SIZE/DIMENSION": "size_dimension",
+    "MAKE (ASSET)": "make",
+    "MODEL": "model",
+    "SERIAL NO": "serial_no",
+    "PART NO": "part_no",
+    "COUNTRY": "country",
+}
+#: These two live as real columns on AssetTag; everything else is a key inside
+#: final_payload["fields"][key]["value"] (JSONB).
+PLAIN_COLUMNS = {"tag_number", "description"}
+
+
+def _wildcard_pattern(value: str) -> str:
+    """Turn a user-typed `*` search into an ILIKE pattern.
+
+    `%` and `_` in the user's text are escaped first so they stay literal, then
+    `*` becomes the SQL wildcard `%`. A value with no `*` therefore has no
+    unescaped `%` left, so ILIKE degrades to an exact (case-insensitive) match
+    — one code path covers both "=" and wildcard search.
+    """
+    escaped = value.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped.replace("*", "%")
+
+
+def _search_condition(field_key: str, value: str):
+    pattern = _wildcard_pattern(value)
+    if field_key in PLAIN_COLUMNS:
+        return getattr(AssetTag, field_key).ilike(pattern, escape="\\")
+    return AssetTag.final_payload["fields"][field_key]["value"].astext.ilike(pattern, escape="\\")
+
+
+@router.get("/search", response_model=Page[SearchResultOut])
+async def search_tags(
+    user: CurrentUser,
+    db: DbSession,
+    field: str = Query(..., max_length=64),
+    value: str = Query("", max_length=256),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+) -> Page[SearchResultOut]:
+    """Multi-field tag search backing the Search page.
+
+    Scoped the same way as `list_tags`: non-admins only ever see tags they
+    personally extracted; admins get the org-wide view. Only the field chosen
+    in the dropdown is searched — never every field at once.
+    """
+    field_key = SEARCH_FIELDS.get(field.strip().upper())
+    if field_key is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown search field.")
+
+    # The batch item whose extraction produced this tag — a duplicate re-upload
+    # of the same tag_number is marked DUPLICATE, never COMPLETED, so at most
+    # one row here is ever COMPLETED for a given asset_tag_id.
+    completed_item = aliased(BatchItem)
+    query = (
+        select(AssetTag, User.username, completed_item.batch_id, completed_item.id)
+        .join(User, User.id == AssetTag.created_by_id, isouter=True)
+        .join(
+            completed_item,
+            and_(completed_item.asset_tag_id == AssetTag.id,
+                 completed_item.status == ItemStatus.COMPLETED),
+            isouter=True,
+        )
+    )
+    count_query = select(func.count()).select_from(AssetTag)
+
+    if user.role != UserRole.ADMIN:
+        query = query.where(AssetTag.created_by_id == user.id)
+        count_query = count_query.where(AssetTag.created_by_id == user.id)
+
+    if value.strip():
+        condition = _search_condition(field_key, value)
+        query = query.where(condition)
+        count_query = count_query.where(condition)
+
+    total = await db.scalar(count_query) or 0
+    rows = (
+        await db.execute(
+            query.order_by(AssetTag.updated_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+
+    items = []
+    for tag, username, batch_id, batch_item_id in rows:
+        out = SearchResultOut.model_validate(tag)
+        out.has_ai_excel = bool(tag.ai_excel_path)
+        out.has_template_excel = bool(tag.template_excel_path)
+        out.username = username
+        out.batch_id = batch_id
+        out.batch_item_id = batch_item_id
+        items.append(out)
+
+    return Page[SearchResultOut](items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/download-all/template")
@@ -142,12 +252,13 @@ async def get_by_number(tag_number: str, user: CurrentUser, db: DbSession) -> As
     tag = await db.scalar(select(AssetTag).where(AssetTag.tag_number == tag_number.upper()))
     if tag is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No record for that tag number.")
-    return _out(tag)
+    return _out(tag, await _username_of(db, tag))
 
 
 @router.get("/{tag_id}", response_model=AssetTagOut)
 async def get_tag(tag_id: int, user: CurrentUser, db: DbSession) -> AssetTagOut:
-    return _out(await _get_tag(db, tag_id))
+    tag = await _get_tag(db, tag_id)
+    return _out(tag, await _username_of(db, tag))
 
 
 @router.put("/{tag_id}", response_model=AssetTagOut)
@@ -185,7 +296,7 @@ async def save_tag(
     ))
     await db.commit()
     await db.refresh(tag)
-    return _out(tag)
+    return _out(tag, await _username_of(db, tag))
 
 
 async def _download(db, tag: AssetTag, kind: str, user) -> FileResponse:

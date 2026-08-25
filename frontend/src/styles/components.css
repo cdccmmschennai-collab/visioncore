@@ -304,6 +304,21 @@
 }
 .search-clear:hover { color: var(--vc-text); }
 
+/* Search page's field / value / button row — one line, dropdown fixed,
+   value input takes the remaining space, button stays compact. */
+.search-form { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; }
+.search-form .select { flex: 0 0 200px; width: 200px; }
+.search-form .input { flex: 1 1 auto; min-width: 0; }
+.search-form .btn { flex: none; }
+
+.json-view {
+  margin: 0; padding: 14px 16px; max-height: 60vh; overflow: auto;
+  background: var(--vc-raised); border: 1px solid var(--vc-line);
+  border-radius: var(--vc-radius-sm);
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; color: var(--vc-text);
+}
+
 .pagination {
   display: flex; align-items: center; justify-content: space-between;
   gap: 16px; flex-wrap: wrap; font-size: 12.5px;
@@ -419,6 +434,12 @@
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 16px 20px; border-bottom: 1px solid var(--vc-line);
 }
+.modal-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-head-actions { display: flex; align-items: center; gap: 12px; flex: none; }
+.modal-user-badge {
+  font-size: 13px; font-weight: 700; color: var(--vc-orange-bright);
+  white-space: nowrap;
+}
 .modal-body { padding: 20px; overflow-y: auto; }
 .modal-foot {
   padding: 14px 20px; border-top: 1px solid var(--vc-line);
@@ -510,6 +531,8 @@
 @media (max-width: 560px) {
   .page-head { align-items: flex-start; }
   .search { min-width: 100%; }
+  .search-form { flex-wrap: wrap; }
+  .search-form .select, .search-form .input, .search-form .btn { flex: 1 1 100%; width: 100%; }
   .theme-picker { flex-direction: column; }
   .toast-stack { left: 16px; right: 16px; bottom: 16px; max-width: none; }
   .app-header { padding: 0 12px; gap: 8px; }

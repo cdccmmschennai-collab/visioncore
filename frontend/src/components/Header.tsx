@@ -14,6 +14,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home' },
   { to: '/batch', label: 'New Batch' },
   { to: '/history', label: 'History' },
+  { to: '/search', label: 'Search' },
   { to: '/admin', label: 'Admin', adminOnly: true },
   { to: '/settings', label: 'Settings' },
 ]

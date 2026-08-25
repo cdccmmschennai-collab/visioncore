@@ -263,6 +263,9 @@ export default function History() {
       <Modal
         open={selected !== null || loadingTag}
         title={selected ? `${selected.tag_number} — ${selected.description}` : 'Loading…'}
+        titleExtra={selected && (
+          <span className="modal-user-badge">{selected.username || 'Unknown'}</span>
+        )}
         onClose={() => setSelected(null)}
         width={980}
       >

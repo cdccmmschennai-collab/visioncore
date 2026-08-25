@@ -49,6 +49,14 @@ class AssetTagOut(ORMModel):
     has_template_excel: bool = False
     created_at: datetime
     updated_at: datetime
+    #: Username of the user who extracted this tag (AssetTag.created_by_id).
+    username: str | None = None
+
+
+class SearchResultOut(AssetTagOut):
+    """One AssetTag row plus the extra columns the Search page's table needs."""
+    batch_id: int | None = None
+    batch_item_id: int | None = None
 
 
 class BatchItemOut(ORMModel):

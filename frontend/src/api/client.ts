@@ -2,7 +2,7 @@ import { API_V1 } from '@/config'
 import type { StagedFile } from '@/utils/upload'
 import type {
   AdminStats, AssetTag, Batch, BatchItem, ClaudeUsageSummary, ExtractedImage, ExtractionPayload,
-  HistoryRow, OrgCredits, Page, TokenResponse, UploadResponse, User,
+  HistoryRow, OrgCredits, Page, SearchResult, TokenResponse, UploadResponse, User,
 } from './types'
 
 const ACCESS_KEY = 'visioncore.access'
@@ -216,6 +216,15 @@ export const api = {
       `${tag.tag_number}-${tag.description}-Template.xlsx`),
   downloadAllTemplates: () =>
     download('/tags/download-all/template', 'All-Tags-Template.xlsx'),
+  searchTags: (params: { field: string; value: string; page?: number; pageSize?: number }) => {
+    const query = new URLSearchParams({
+      field: params.field,
+      value: params.value,
+      page: String(params.page ?? 1),
+      page_size: String(params.pageSize ?? 25),
+    })
+    return request<Page<SearchResult>>(`/tags/search?${query}`)
+  },
 
   // ── history ─────────────────────────────────────────────────────────────
   history: (params: {
@@ -249,7 +258,7 @@ export const api = {
     request<{ message: string }>(`/admin/users/${id}`, { method: 'DELETE' }),
   usage: (days = 30) => request<ClaudeUsageSummary>(`/admin/usage?days=${days}`),
   orgCredits: () => request<OrgCredits>('/admin/org-credits'),
-  setOrgCredits: (amount_usd: number) =>
-    request<OrgCredits>('/admin/org-credits', { method: 'PATCH', body: { amount_usd } }),
+  topUpOrgCredits: (top_up_usd: number) =>
+    request<OrgCredits>('/admin/org-credits', { method: 'PATCH', body: { top_up_usd } }),
   stats: () => request<AdminStats>('/admin/stats'),
 }
