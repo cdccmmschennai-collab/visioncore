@@ -32,6 +32,14 @@ _ADMIN_API_BASE = "https://api.anthropic.com/v1/organizations"
 _ANTHROPIC_VERSION = "2023-06-01"
 _MAX_DAYS = 31  # Usage/Cost API's max window at 1-day bucket granularity
 
+#: How long a fetched report is reused before calling Anthropic again.
+#: The Admin page polls every 60s and Anthropic's Admin API has a tight
+#: rate limit, so this keeps concurrent/duplicate polls (multiple tabs,
+#: multiple admins) from tripping a 429.
+_CACHE_TTL = timedelta(seconds=55)
+_cache: dict[int, tuple[datetime, ClaudeUsageResult]] = {}
+_cache_lock = asyncio.Lock()
+
 #: Metrics with no official grounding at all — no Anthropic endpoint exposes
 #: them for a Claude Console/Platform organization (confirmed: the Spend
 #: Limits API that covers credits/budget is Claude Enterprise-only). Kept as
@@ -83,6 +91,14 @@ async def fetch_claude_usage_report(days: int) -> ClaudeUsageResult:
         )
 
     window = min(max(days, 1), _MAX_DAYS)
+
+    async with _cache_lock:
+        cached = _cache.get(window)
+        if cached is not None:
+            cached_at, cached_result = cached
+            if datetime.now(timezone.utc) - cached_at < _CACHE_TTL:
+                return cached_result
+
     ending_at = datetime.now(timezone.utc).replace(microsecond=0)
     starting_at = ending_at - timedelta(days=window)
     starting_str = starting_at.isoformat().replace("+00:00", "Z")
@@ -112,6 +128,15 @@ async def fetch_claude_usage_report(days: int) -> ClaudeUsageResult:
             cost_resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         logger.warning("Anthropic Usage & Cost API returned an error: %s", exc)
+        if exc.response.status_code == 429:
+            stale = _cache.get(window)
+            if stale is not None:
+                logger.info("Serving stale Claude usage cache after a 429 from Anthropic.")
+                return stale[1]
+            raise ClaudeUsageUnavailable(
+                "Anthropic's Admin API is rate-limiting usage/cost requests (HTTP 429). "
+                "This clears on its own within a minute or two."
+            ) from exc
         raise ClaudeUsageUnavailable(
             f"Anthropic's API returned HTTP {exc.response.status_code}. "
             "Check that ANTHROPIC_ADMIN_API_KEY is valid and has usage/cost read access."
@@ -156,13 +181,18 @@ async def fetch_claude_usage_report(days: int) -> ClaudeUsageResult:
     daily = sorted(days_map.values(), key=lambda d: d.day)
     by_model = sorted(model_totals.values(), key=lambda m: -(m.input_tokens + m.output_tokens))
 
-    return ClaudeUsageResult(
+    result = ClaudeUsageResult(
         daily=daily,
         by_model=by_model,
         total_input_tokens=sum(d.input_tokens for d in daily),
         total_output_tokens=sum(d.output_tokens for d in daily),
         total_cost_usd=sum(d.cost_usd for d in daily),
     )
+
+    async with _cache_lock:
+        _cache[window] = (datetime.now(timezone.utc), result)
+
+    return result
 
 
 def _bucket_date(starting_at: str) -> date:

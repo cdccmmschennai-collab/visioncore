@@ -119,3 +119,8 @@ rather than reading it: every API call's `usage` block is written to `api_usage`
 using the per-million rates in `.env`, and totalled against `CLAUDE_CREDIT_BUDGET_USD`.
 Update the rates when your plan changes. See `docs/EXCEL_FORMAT.md` for the workbook
 specification and `docs/ARCHITECTURE.md` for the request lifecycle.
+
+## 8. Deploying to production
+
+See `docs/DEPLOYMENT.md` for a step-by-step guide to running this on a VPS
+(Hostinger or equivalent) with Docker Compose, TLS via Caddy, and backups.
