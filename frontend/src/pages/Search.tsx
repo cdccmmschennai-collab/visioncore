@@ -3,9 +3,10 @@ import BatchImagesModal from '@/components/BatchImagesModal'
 import EditableTable from '@/components/EditableTable'
 import Modal from '@/components/Modal'
 import Pagination from '@/components/Pagination'
+import QualityChip from '@/components/QualityChip'
 import Spinner from '@/components/Spinner'
 import { api } from '@/api/client'
-import { SEARCH_FIELDS } from '@/api/types'
+import { FIELD_ORDER, NOT_PRESENT, SEARCH_FIELDS } from '@/api/types'
 import type { AssetTag, ExtractionPayload, SearchResult } from '@/api/types'
 import { useToast } from '@/store/ToastContext'
 
@@ -33,7 +34,9 @@ export default function Search() {
   const [loadingTag, setLoadingTag] = useState(false)
   const [viewingBatchId, setViewingBatchId] = useState<number | null>(null)
   const [viewingItemId, setViewingItemId] = useState<number | null>(null)
-  const [jsonView, setJsonView] = useState<{ title: string; data: unknown } | null>(null)
+  const [payloadView, setPayloadView] = useState<
+    { title: string; payload: ExtractionPayload; variant: 'ai' | 'final' } | null
+  >(null)
 
   const load = useCallback(async () => {
     if (!query) return
@@ -148,8 +151,8 @@ export default function Search() {
                   <tr>
                     <th>Tag Number</th>
                     <th>Description</th>
-                    <th>AI Payload</th>
-                    <th>Final Payload</th>
+                    <th>AI Extraction</th>
+                    <th>Manual Review</th>
                     <th>User</th>
                     <th style={{ width: 110 }}>View Details</th>
                     <th style={{ width: 110 }}>View Photo</th>
@@ -164,18 +167,26 @@ export default function Search() {
                         <button
                           type="button"
                           className="btn btn-sm"
-                          onClick={() => setJsonView({ title: `${row.tag_number} — AI Payload`, data: row.ai_payload })}
+                          onClick={() => setPayloadView({
+                            title: `${row.tag_number} — AI Extraction`,
+                            payload: row.ai_payload,
+                            variant: 'ai',
+                          })}
                         >
-                          View JSON
+                          View
                         </button>
                       </td>
                       <td>
                         <button
                           type="button"
                           className="btn btn-sm"
-                          onClick={() => setJsonView({ title: `${row.tag_number} — Final Payload`, data: row.final_payload })}
+                          onClick={() => setPayloadView({
+                            title: `${row.tag_number} — Manual Review`,
+                            payload: row.final_payload,
+                            variant: 'final',
+                          })}
                         >
-                          View JSON
+                          View
                         </button>
                       </td>
                       <td className="muted">{row.username ?? '—'}</td>
@@ -235,12 +246,67 @@ export default function Search() {
       />
 
       <Modal
-        open={jsonView !== null}
-        title={jsonView?.title ?? ''}
-        onClose={() => setJsonView(null)}
+        open={payloadView !== null}
+        title={payloadView?.title ?? ''}
+        onClose={() => setPayloadView(null)}
         width={640}
       >
-        <pre className="json-view">{JSON.stringify(jsonView?.data ?? {}, null, 2)}</pre>
+        {payloadView && (
+          <div className="table-wrap">
+            <table className="data result-table">
+              <thead>
+                <tr>
+                  <th style={{ width: '38%' }}>Field</th>
+                  <th>Value</th>
+                  {payloadView.variant === 'final' && <th style={{ width: 148 }}>Data Quality</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {FIELD_ORDER.map(({ key, label }) => {
+                  const field = payloadView.payload.fields?.[key]
+                  const value = field?.value ?? ''
+                  const isMissing = value === NOT_PRESENT
+                  return (
+                    <tr key={key}>
+                      <th scope="row" className="field-label">{label}</th>
+                      <td>
+                        <span className={`field-value${isMissing ? ' field-missing' : ''}`}>
+                          {value || '—'}
+                        </span>
+                      </td>
+                      {payloadView.variant === 'final' && (
+                        <td><QualityChip quality={field?.quality ?? 'Verify'} missing={isMissing} /></td>
+                      )}
+                    </tr>
+                  )
+                })}
+
+                {payloadView.variant === 'final' && (
+                  <>
+                    <tr>
+                      <th scope="row" className="field-label">Remarks</th>
+                      <td colSpan={2}>
+                        <span className="field-value">{payloadView.payload.remarks || '—'}</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row" className="field-label">Photo Status</th>
+                      <td colSpan={2}>
+                        <span className="field-value">{payloadView.payload.photo_status || '—'}</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row" className="field-label">QC Comment</th>
+                      <td colSpan={2}>
+                        <span className="field-value">{payloadView.payload.qc_comment || '—'}</span>
+                      </td>
+                    </tr>
+                  </>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Modal>
     </div>
   )

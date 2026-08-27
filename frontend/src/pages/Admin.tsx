@@ -195,10 +195,11 @@ export default function Admin() {
                   Straight from Anthropic's official Usage &amp; Cost Admin API — no locally
                   estimated figures.
                   {usage?.available && (
-                    <> Model <code>{usage.configured_model}</code> · last {usage.window_days} days</>
+                    <> Model <code>{usage.configured_model}</code> · updated {" "}
+                       {new Date().toLocaleDateString("en-GB")}</>
                   )}
                   {usage && (
-                    <> · updated {new Date(usage.generated_at).toLocaleTimeString()}</>
+                    <> .  {new Date(usage.generated_at).toLocaleTimeString()}</>
                   )}
                 </span>
               </div>
@@ -246,34 +247,7 @@ export default function Admin() {
                   ))}
                 </div>
 
-                {usage.by_model.length > 0 && (
-                  <div className="stack gap-8">
-                    <span className="eyebrow">Usage by model</span>
-                    <div className="table-wrap">
-                      <table className="data">
-                        <thead>
-                          <tr>
-                            <th>Model</th>
-                            <th>Input tokens</th>
-                            <th>Output tokens</th>
-                            <th>Total tokens</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {usage.by_model.map((m) => (
-                            <tr key={m.model}>
-                              <td><code>{m.model}</code></td>
-                              <td>{formatNumber(m.input_tokens)}</td>
-                              <td>{formatNumber(m.output_tokens)}</td>
-                              <td>{formatNumber(m.total_tokens)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
+                
                 {usage.daily.length > 0 && (
                   <div className="stack gap-8">
                     <span className="eyebrow">Daily usage &amp; spend — last {usage.window_days} days</span>
