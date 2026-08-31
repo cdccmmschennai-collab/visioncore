@@ -50,7 +50,7 @@ export default function Login() {
 
           <div className="login-welcome">
             <h1>Welcome Back</h1>
-            <p className="login-welcome-sub">Sign in to continue to your account</p>
+            <p className="login-welcome-sub">Sign in to continue to your workspace</p>
           </div>
 
           <form onSubmit={submit} className="stack gap-16" noValidate>
