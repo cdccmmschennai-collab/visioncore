@@ -87,6 +87,10 @@ def _write_asset_tag_row(ws: Worksheet, row_idx: int, serial: int, record: dict)
         display = "" if is_blank(value) else value
         cell = ws.cell(row=row_idx, column=col, value=display or None)
 
+        # Force text format so Excel never renders "02" as the number 2.
+        if field.key in ("year_of_manufacture", "month_of_manufacture"):
+            cell.number_format = "@"
+
         # Blue where a reviewer supplied or changed the value the AI returned.
         ai_value = value_of(ai_payload, field.key) if ai_payload else value
         reviewer_supplied = bool(display) and ai_value.strip() != value.strip()
