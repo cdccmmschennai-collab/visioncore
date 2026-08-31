@@ -43,8 +43,8 @@ export default function Login() {
           <div className="login-brand">
             <Logo size={60} showName={false} />
             <div className="stack">
-              <span className="login-company">{COMPANY_NAME}</span>
-              <span className="eyebrow">Asset Data Systems</span>
+              <span className="login-company">Asset Data Systems</span>
+              <span className="eyebrow">{COMPANY_NAME}</span>
             </div>
           </div>
 

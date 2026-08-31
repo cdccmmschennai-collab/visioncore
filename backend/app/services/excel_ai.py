@@ -108,6 +108,9 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
         value = value_of(payload, field.key)
         b = ws.cell(row=row, column=2, value=value)
         b.font, b.alignment, b.border = body_font, left_top, BORDER
+        # Force text format so Excel never renders "02" as the number 2.
+        if field.key in ("year_of_manufacture", "month_of_manufacture"):
+            b.number_format = "@"
 
         missing = is_blank(value)
         quality = quality_of(payload, field.key)

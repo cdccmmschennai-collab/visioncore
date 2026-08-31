@@ -93,10 +93,16 @@ logo or model code, worn, glared, partially obscured, or absent.
 4. Use UPPERCASE for short coded values (sizes, materials, classifications).
 5. "year_of_manufacture" is YYYY, "month_of_manufacture" is MM. A date code such \
 as "10/24" means month 10, year 2024 — record both and say so in remarks.
-6. "additional_information": every remaining nameplate detail as \
-"LABEL: value" pairs separated by ", " — body/trim materials, standards, \
-pressure and temperature ratings, certificate numbers, calibration data, \
-drawing numbers, supply voltages.
+6. "additional_information": every remaining nameplate detail not already \
+captured by one of the dedicated fields above, as "LABEL: value" pairs \
+separated by ", " — body/trim materials, standards, pressure and temperature \
+ratings, certificate numbers, calibration data, drawing numbers, supply \
+voltages. Do not add an entry that merely restates a value already recorded \
+in a dedicated field (e.g. no plain "MONTH: 02" or "YEAR: 2024" line, since \
+those live in month_of_manufacture / year_of_manufacture). A composite code \
+printed on the plate in its own right — such as a date code like "02/24" — \
+is still transcribed once as printed, since it documents the plate's own \
+notation, not a restatement.
 7. "hazardous_classification": the full ATEX/IECEx marking including certificate \
 numbers, ingress rating and temperature class, if present.
 8. "remarks": a short note naming anything a human should check — what was \
@@ -105,6 +111,13 @@ number in the filename and one printed on the plate. Empty string if nothing.
 9. "photo_status": how hard the plate was to read — EASY, MEDIUM or HARD.
 10. When several photos show the same plate, reconcile them and prefer the \
 clearest reading of each field.
+11. For "part_no", "serial_no", and "model": strip only the field's own \
+printed label/abbreviation — "P/N:", "P/N.", "P/N-", "S/No.", "S.No:", "M/N", \
+"Model:", "Ser. No", and similar — and record just the identifier that \
+follows. Do not alter the identifier itself: keep every letter, digit, \
+hyphen and slash that is part of the value, in the order printed. These \
+identifiers are not necessarily numeric — "P/N: AB-123-CD" is "AB-123-CD", \
+not a digits-only reading of it.
 """
 
 

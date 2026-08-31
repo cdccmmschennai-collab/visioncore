@@ -99,6 +99,11 @@ def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
 
         if quality not in VALID_QUALITY:
             quality = QUALITY_VERIFY
+        # Claude is asked for month_of_manufacture as a zero-padded "MM"
+        # string, but a JSON response can still carry it as a bare number
+        # (e.g. 2 instead of "02") and str() alone would drop the padding.
+        if f.key == "month_of_manufacture" and value.isdigit():
+            value = value.zfill(2)
         out["fields"][f.key] = {"value": value or NOT_PRESENT, "quality": quality}
 
     # Filename wins for identity fields.
