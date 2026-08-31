@@ -9,6 +9,8 @@ means either one can change without touching the other.
 """
 from datetime import datetime
 
+from pydantic import BaseModel
+
 from app.models.activity import ActivityAction
 from app.models.batch import BatchStatus
 from app.models.tag import ItemStatus
@@ -27,6 +29,20 @@ class SyncUserOut(ORMModel):
     updated_at: datetime
     # hashed_password is intentionally never included here — credentials
     # never leave production. See sync_client._row_values.
+
+
+class SyncUserPush(BaseModel):
+    """Local -> production: a user created on the local/mirror Admin page,
+    pushed so it also exists on production. See app/services/sync_client.py
+    ::push_user (sender) and app/api/v1/sync.py::push_user (receiver).
+
+    No password field, by design — see the receiver's handling.
+    """
+    username: str
+    email: str | None = None
+    full_name: str | None = None
+    role: UserRole
+    is_active: bool
 
 
 class SyncBatchOut(ORMModel):

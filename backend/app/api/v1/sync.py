@@ -24,6 +24,7 @@ from app.schemas.sync import (
     SyncBatchOut,
     SyncTagImageOut,
     SyncUserOut,
+    SyncUserPush,
 )
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -31,6 +32,12 @@ router = APIRouter(prefix="/sync", tags=["sync"])
 #: Kept small and shared with sync_client.py — the client uses "did this page
 #: come back full" as its signal that more rows are immediately pending.
 PAGE_SIZE = 100
+
+#: Same placeholder convention as sync_client._UNUSABLE_PASSWORD_HASH, for a
+#: brand-new user arriving here via push_user() below — not a real bcrypt
+#: hash, so it can never be logged into until an admin sets a real password
+#: on this side.
+_UNUSABLE_PASSWORD_HASH = "!sync-managed-account"
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -99,3 +106,27 @@ async def sync_activities(
     since_updated_at: datetime = Query(EPOCH), since_id: int = Query(0),
 ) -> list[SyncActivityOut]:
     return await _page(db, Activity, SyncActivityOut, since_updated_at, since_id)
+
+
+@router.post("/users", response_model=SyncUserOut)
+async def push_user(body: SyncUserPush, _: SyncAuth, db: DbSession) -> SyncUserOut:
+    """Local -> production: receives a user pushed from app/services/
+    sync_client.py::push_user after an admin creates it on the local Admin
+    page. Upserted by username so a retried push is never duplicated.
+
+    Never receives or sets a real password — a brand-new row here gets the
+    same unusable placeholder hash a pulled-in user gets on the other side
+    (see sync_client._UNUSABLE_PASSWORD_HASH); an admin sets a real password
+    on this side separately. An existing account's password is left alone.
+    """
+    user = await db.scalar(select(User).where(User.username == body.username))
+    if user is None:
+        user = User(username=body.username, hashed_password=_UNUSABLE_PASSWORD_HASH)
+        db.add(user)
+    user.email = body.email
+    user.full_name = body.full_name
+    user.role = body.role
+    user.is_active = body.is_active
+    await db.commit()
+    await db.refresh(user)
+    return SyncUserOut.model_validate(user)

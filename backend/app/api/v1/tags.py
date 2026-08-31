@@ -134,9 +134,10 @@ async def search_tags(
 ) -> Page[SearchResultOut]:
     """Multi-field tag search backing the Search page.
 
-    Scoped the same way as `list_tags`: non-admins only ever see tags they
-    personally extracted; admins get the org-wide view. Only the field chosen
-    in the dropdown is searched — never every field at once.
+    Org-wide for every user, admin or not — unlike `list_tags`, search isn't
+    scoped to tags the caller personally extracted. The results table's
+    "User" column already shows who extracted each match. Only the field
+    chosen in the dropdown is searched — never every field at once.
     """
     field_key = SEARCH_FIELDS.get(field.strip().upper())
     if field_key is None:
@@ -157,10 +158,6 @@ async def search_tags(
         )
     )
     count_query = select(func.count()).select_from(AssetTag)
-
-    if user.role != UserRole.ADMIN:
-        query = query.where(AssetTag.created_by_id == user.id)
-        count_query = count_query.where(AssetTag.created_by_id == user.id)
 
     if value.strip():
         condition = _search_condition(field_key, value)

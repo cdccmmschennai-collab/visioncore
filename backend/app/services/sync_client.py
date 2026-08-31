@@ -142,6 +142,42 @@ async def _sync_one_page(client: httpx.AsyncClient, resource: str, path: str, mo
         return len(rows) == PAGE_SIZE
 
 
+async def push_user(user: User) -> None:
+    """Local -> production: best-effort push of a locally-created user so it
+    also shows up on production — the inverse of the pull loop below, added
+    only for User because that's the one thing an admin creates locally that
+    also needs to exist on production. Called from
+    app/api/v1/admin.py::create_user as a fire-and-forget background task,
+    so local user creation always succeeds even if production is
+    unreachable; any failure here is logged and never raised.
+
+    Never sends a password — see app/api/v1/sync.py::push_user for how the
+    production row is created instead.
+    """
+    if not settings.sync_source_url or not settings.sync_api_token:
+        return
+    headers = {"Authorization": f"Bearer {settings.sync_api_token}"}
+    payload = {
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role.value,
+        "is_active": user.is_active,
+    }
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.sync_source_url, headers=headers, timeout=10.0
+        ) as client:
+            response = await client.post("/api/v1/sync/users", json=payload)
+            response.raise_for_status()
+        logger.info("Pushed user %s to production", user.username)
+    except Exception:
+        logger.exception(
+            "Could not push user %s to production — it exists locally only "
+            "until the next successful push", user.username,
+        )
+
+
 async def run_sync_loop() -> None:
     """Entry point wired into app.main's lifespan. Runs until cancelled."""
     if not settings.sync_source_url:
