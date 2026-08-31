@@ -13,8 +13,14 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app.core import deps
-from app.models import User
-from app.services.sync_client import _PROTECTED_COLUMNS, _UNUSABLE_PASSWORD_HASH, _coerce_row
+from app.core.config import settings
+from app.models import User, UserRole
+from app.services.sync_client import (
+    _PROTECTED_COLUMNS,
+    _UNUSABLE_PASSWORD_HASH,
+    _coerce_row,
+    push_user,
+)
 
 
 def test_coerce_row_parses_iso_datetimes_for_the_asyncpg_driver():
@@ -73,3 +79,12 @@ def test_sync_endpoints_accept_the_correct_token(monkeypatch):
     monkeypatch.setattr(deps.settings, "sync_api_token", "correct-token")
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="correct-token")
     asyncio.run(deps.require_sync_token(creds))  # does not raise
+
+
+def test_push_user_is_a_noop_when_sync_is_not_configured(monkeypatch):
+    # This side only ever pushes when it's also the puller (SYNC_SOURCE_URL
+    # set); production leaves both unset, so it must never try to push here.
+    monkeypatch.setattr(settings, "sync_source_url", "")
+    monkeypatch.setattr(settings, "sync_api_token", "")
+    user = User(id=1, username="alice", role=UserRole.USER, is_active=True)
+    asyncio.run(push_user(user))  # does not raise, makes no request

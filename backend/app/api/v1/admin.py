@@ -1,6 +1,7 @@
 """Admin-only: user management and the Claude usage dashboard."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -34,6 +35,7 @@ from app.services.anthropic_usage import (
     fetch_claude_usage_report,
 )
 from app.services.org_credits import advance_usage_ledger
+from app.services.sync_client import push_user
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -66,6 +68,9 @@ async def create_user(body: UserCreate, admin: AdminUser, db: DbSession) -> User
                     detail=f"Created user {user.username} ({user.role.value})"))
     await db.commit()
     await db.refresh(user)
+    # Best-effort, non-blocking: local user creation must succeed even if
+    # production is unreachable. See sync_client.push_user.
+    asyncio.create_task(push_user(user))
     return UserOut.model_validate(user)
 
 
