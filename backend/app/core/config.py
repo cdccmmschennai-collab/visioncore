@@ -78,6 +78,16 @@ class Settings(BaseSettings):
         alias="TEMPLATE_OUTPUT_PATH_PREFIX",
     )
 
+    # ── Production -> local sync ─────────────────────────────────────────────
+    # Shared secret, set identically in both environments' .env files.
+    # Production uses it to authenticate incoming pulls (app/api/v1/sync.py);
+    # local uses it to authenticate outgoing ones (app/services/sync_client.py).
+    sync_api_token: str = Field("", alias="SYNC_API_TOKEN")
+    # Base URL of the production API. Leave blank on production itself — that
+    # is what keeps the pull loop from ever starting there.
+    sync_source_url: str = Field("", alias="SYNC_SOURCE_URL")
+    sync_poll_interval_seconds: int = Field(30, alias="SYNC_POLL_INTERVAL_SECONDS")
+
     # ── Seed accounts ────────────────────────────────────────────────────────
     seed_admin_username: str = Field("admin", alias="SEED_ADMIN_USERNAME")
     seed_admin_password: str = Field("Admin@123", alias="SEED_ADMIN_PASSWORD")

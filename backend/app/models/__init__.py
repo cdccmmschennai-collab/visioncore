@@ -2,6 +2,7 @@
 from app.models.activity import Activity, ActivityAction
 from app.models.batch import Batch, BatchStatus
 from app.models.org_credits import OrgCredits
+from app.models.sync_cursor import SyncCursor
 from app.models.tag import AssetTag, BatchItem, ItemStatus, TagImage
 from app.models.usage import ApiUsage
 from app.models.user import User, UserRole
@@ -10,6 +11,7 @@ __all__ = [
     "Activity", "ActivityAction",
     "Batch", "BatchStatus",
     "OrgCredits",
+    "SyncCursor",
     "AssetTag", "BatchItem", "ItemStatus", "TagImage",
     "ApiUsage",
     "User", "UserRole",

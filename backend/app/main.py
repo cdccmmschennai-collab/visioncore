@@ -1,4 +1,6 @@
 """Visioncore API entrypoint."""
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,6 +16,7 @@ from app.core.config import settings
 from app.db.seed import seed_users
 from app.db.session import AsyncSessionLocal, engine
 from app.services.storage import storage_root
+from app.services.sync_client import run_sync_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,8 +39,17 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "ANTHROPIC_API_KEY is not set \u2014 uploads will fail at the extraction step."
         )
+
+    # Only the local/mirror side sets SYNC_SOURCE_URL \u2014 production leaves it
+    # blank and never starts this task.
+    sync_task = asyncio.create_task(run_sync_loop()) if settings.sync_source_url else None
+
     logger.info("Visioncore API ready")
     yield
+    if sync_task is not None:
+        sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sync_task
     await engine.dispose()
 
 
