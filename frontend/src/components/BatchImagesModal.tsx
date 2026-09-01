@@ -40,20 +40,40 @@ export default function BatchImagesModal({ batchId, itemId = null, onClose }: Pr
         // Tag Number / Description were already parsed from the filename (or
         // folder name) at upload time — reuse that instead of re-parsing here.
         const items = itemId === null ? batch.items : batch.items.filter((item) => item.id === itemId)
+        let failures = 0
         const withUrls = await Promise.all(
           items.map(async (item) => ({
             tagNumber: item.tag_number,
             description: item.description,
-            photos: await Promise.all(
-              item.images.map(async (image) => ({
-                id: image.id,
-                original_filename: image.original_filename,
-                url: await api.batchImageUrl(batchId, image.id),
-              })),
-            ),
+            // One photo failing to load (missing from storage, no access)
+            // shouldn't blank out every other photo in this same upload.
+            photos: (
+              await Promise.all(
+                item.images.map(async (image) => {
+                  try {
+                    return {
+                      id: image.id,
+                      original_filename: image.original_filename,
+                      url: await api.batchImageUrl(batchId, image.id),
+                    }
+                  } catch {
+                    failures += 1
+                    return null
+                  }
+                }),
+              )
+            ).filter((photo): photo is Photo => photo !== null),
           })),
         )
-        if (!cancelled) setGroups(withUrls.filter((group) => group.photos.length > 0))
+        if (cancelled) return
+        setGroups(withUrls.filter((group) => group.photos.length > 0))
+        if (failures > 0) {
+          toast.info(
+            failures === 1
+              ? '1 photo could not be loaded.'
+              : `${failures} photos could not be loaded.`,
+          )
+        }
       })
       .catch((caught) => {
         toast.error(caught instanceof Error ? caught.message : 'Could not load the uploaded photos.')

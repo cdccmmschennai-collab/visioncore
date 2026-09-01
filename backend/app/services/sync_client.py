@@ -38,6 +38,7 @@ from app.api.v1.sync import PAGE_SIZE
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.models import Activity, AssetTag, Batch, BatchItem, SyncCursor, TagImage, User
+from app.services.storage import local_path_for
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ async def _sync_photo_files(client: httpx.AsyncClient, rows: list[dict[str, Any]
     previous cycle that already fetched it) is simply skipped.
     """
     for row in rows:
-        target = Path(row["stored_path"])
+        target = local_path_for(row["stored_path"])
         if target.is_file():
             continue
         try:
@@ -140,6 +141,32 @@ async def _sync_photo_files(client: httpx.AsyncClient, rows: list[dict[str, Any]
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(response.content)
+
+
+async def fetch_missing_photo(image_id: int, stored_path: str) -> Path | None:
+    """On-demand fallback for a tag_images row whose file isn't on disk here —
+    used by app/api/v1/batches.py::get_batch_image when resolve_stored 404s.
+    Covers rows pulled in by a page that ran before _sync_photo_files existed
+    (their sync cursor has already moved past them, so the pull loop above
+    will never revisit them). No-op on production itself (sync_source_url
+    unset), same guard as run_sync_loop.
+    """
+    if not settings.sync_source_url or not settings.sync_api_token:
+        return None
+    headers = {"Authorization": f"Bearer {settings.sync_api_token}"}
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.sync_source_url, headers=headers, timeout=30.0
+        ) as client:
+            response = await client.get(f"/api/v1/sync/tag-images/{image_id}/file")
+            response.raise_for_status()
+    except Exception:
+        logger.exception("Could not fetch photo file for tag_image %s", image_id)
+        return None
+    target = local_path_for(stored_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(response.content)
+    return target
 
 
 async def _cursor_for(session, resource: str) -> SyncCursor:

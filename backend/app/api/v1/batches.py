@@ -48,6 +48,7 @@ from app.services.filename_parser import (
 )
 from app.services.pipeline import generate_workbooks, process_batch, reextract_item
 from app.services.storage import ai_output_name, resolve_stored, save_upload, template_output_name
+from app.services.sync_client import fetch_missing_photo
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
@@ -400,20 +401,49 @@ async def retry_item(
 async def get_batch_image(
     batch_id: int, image_id: int, user: CurrentUser, db: DbSession
 ) -> FileResponse:
-    """Serve one of the raw input photos this batch was uploaded with."""
-    await _load_batch(db, batch_id, user)  # 404/403 if the batch isn't the caller's
+    """Serve one of the raw input photos this batch was uploaded with.
 
-    image = await db.scalar(
-        select(TagImage)
-        .join(BatchItem, BatchItem.id == TagImage.item_id)
-        .where(TagImage.id == image_id, BatchItem.batch_id == batch_id)
-    )
-    if image is None:
+    Authorized for the batch's uploader OR the tag's extractor
+    (AssetTag.created_by_id), not just the batch uploader alone. History and
+    Search resolve "View Photo" through whichever batch item is *currently*
+    the completed one for that tag_number (see BATCH_LOOKUP_ACTIONS in
+    app/api/v1/history.py and search_tags in app/api/v1/tags.py) — if that
+    shifts to a different batch after the fact (a re-extraction, an admin
+    reprocessing it), a batch-ownership-only check 403s the very user who
+    extracted the tag, even though it's plainly theirs. Admin is unaffected
+    either way, which is why this only ever showed up for non-admins.
+    """
+    row = (
+        await db.execute(
+            select(TagImage, Batch.user_id, AssetTag.created_by_id)
+            .join(BatchItem, BatchItem.id == TagImage.item_id)
+            .join(Batch, Batch.id == BatchItem.batch_id)
+            .outerjoin(AssetTag, AssetTag.id == BatchItem.asset_tag_id)
+            .where(TagImage.id == image_id, BatchItem.batch_id == batch_id)
+        )
+    ).first()
+    if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "That photo isn't part of this batch.")
+    image, batch_owner_id, tag_creator_id = row
+
+    if user.role != UserRole.ADMIN and user.id not in (batch_owner_id, tag_creator_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "That photo belongs to another user's tag."
+        )
 
     try:
         path = resolve_stored(image.stored_path)
-    except (FileNotFoundError, ValueError):
+    except FileNotFoundError:
+        # Common for a tag synced in before app/services/sync_client.py
+        # downloaded photo files (or from a page pulled before that existed):
+        # the row replicated, the file on disk never did. Fetch it from
+        # production now, on demand.
+        path = await fetch_missing_photo(image.id, image.stored_path)
+        if path is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
+            ) from None
+    except ValueError:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
         ) from None
