@@ -11,7 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TypeVar
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select, tuple_
 
 from app.core.deps import DbSession, SyncAuth
@@ -26,6 +27,7 @@ from app.schemas.sync import (
     SyncUserOut,
     SyncUserPush,
 )
+from app.services.storage import resolve_stored
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -106,6 +108,25 @@ async def sync_activities(
     since_updated_at: datetime = Query(EPOCH), since_id: int = Query(0),
 ) -> list[SyncActivityOut]:
     return await _page(db, Activity, SyncActivityOut, since_updated_at, since_id)
+
+
+@router.get("/tag-images/{image_id}/file")
+async def sync_tag_image_file(image_id: int, _: SyncAuth, db: DbSession) -> FileResponse:
+    """The GET /tag-images row above is a path string only — this serves the
+    actual photo bytes for one of those rows, so app/services/sync_client.py
+    can save a real local copy instead of just a dangling path (which is why
+    "View Photo" 404s on a tag pulled in before this endpoint existed).
+    """
+    image = await db.get(TagImage, image_id)
+    if image is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such image.")
+    try:
+        path = resolve_stored(image.stored_path)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "The photo file is missing from storage here too."
+        ) from None
+    return FileResponse(path=path, filename=image.original_filename, media_type=image.media_type)
 
 
 @router.post("/users", response_model=SyncUserOut)

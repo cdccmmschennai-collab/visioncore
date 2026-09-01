@@ -1,6 +1,8 @@
 """Read, edit and download a saved asset tag."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, func, or_, select
@@ -15,6 +17,8 @@ from app.services.fields import normalise_payload
 from app.services.filename_parser import excel_basename, safe_filename
 from app.services.pipeline import generate_workbooks, template_path_columns
 from app.services.storage import resolve_stored
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tags", tags=["tags"])
 
@@ -41,6 +45,20 @@ async def _username_of(db, tag: AssetTag) -> str | None:
     if tag.created_by_id is None:
         return None
     return await db.scalar(select(User.username).where(User.id == tag.created_by_id))
+
+
+async def _photo_names_and_paths(db, tag_number: str) -> tuple[list[str], list[str]]:
+    rows = (
+        await db.execute(
+            select(TagImage.original_filename, TagImage.stored_path)
+            .join(BatchItem, BatchItem.id == TagImage.item_id)
+            .where(BatchItem.tag_number == tag_number)
+            .order_by(TagImage.id)
+        )
+    ).all()
+    names = [r[0] for r in rows] or [f"{tag_number}.jpg"]
+    paths = [r[1] for r in rows]
+    return names, paths
 
 
 @router.get("", response_model=Page[AssetTagOut])
@@ -306,10 +324,22 @@ async def _download(db, tag: AssetTag, kind: str, user) -> FileResponse:
     try:
         path = resolve_stored(path_str)
     except (FileNotFoundError, ValueError):
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            "The workbook file is missing from storage. Save the tag to rebuild it.",
-        ) from None
+        # Common for a tag synced in from production (app/services/sync_client.py):
+        # the row, including both payloads, replicates — the generated file on disk
+        # never does. Rebuild it here from the payload data, which did sync.
+        try:
+            photo_names, _ = await _photo_names_and_paths(db, tag.tag_number)
+            await generate_workbooks(db, tag, photo_names)
+            await db.commit()
+            path = resolve_stored(
+                tag.ai_excel_path if kind == "ai" else tag.template_excel_path
+            )
+        except Exception:
+            logger.exception("Could not rebuild missing workbook for %s", tag.tag_number)
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "The workbook file is missing from storage and could not be rebuilt.",
+            ) from None
 
     db.add(Activity(
         user_id=user.id, action=ActivityAction.DOWNLOAD,
