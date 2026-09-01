@@ -66,9 +66,28 @@ def write_export(tag_number: str, filename: str, data: bytes) -> Path:
     return target
 
 
+def local_path_for(path_str: str) -> Path:
+    """Re-anchor a stored_path DB value onto this environment's storage root.
+
+    stored_path is saved as an absolute path baked in on whichever machine
+    created the row (see save_upload/write_export below). A row pulled in by
+    app/services/sync_client.py from another environment still carries
+    *that* environment's absolute path — different OS, different install
+    directory — which never lives under this machine's storage root. Rebuild
+    it from its position under 'uploads' or 'exports', the only two
+    subtrees a stored_path is ever under, so it resolves correctly no matter
+    which environment originally wrote it.
+    """
+    parts = Path(path_str.replace("\\", "/")).parts
+    for anchor in ("uploads", "exports"):
+        if anchor in parts:
+            return storage_root().joinpath(*parts[parts.index(anchor):])
+    return storage_root() / Path(path_str).name
+
+
 def resolve_stored(path_str: str) -> Path:
     """Validate a path read back from the database before serving it."""
-    path = _within_root(Path(path_str))
+    path = _within_root(local_path_for(path_str))
     if not path.is_file():
         raise FileNotFoundError(path_str)
     return path

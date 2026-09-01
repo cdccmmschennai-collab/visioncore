@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -37,6 +38,7 @@ from app.api.v1.sync import PAGE_SIZE
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.models import Activity, AssetTag, Batch, BatchItem, SyncCursor, TagImage, User
+from app.services.storage import local_path_for
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,71 @@ async def _upsert_page(session, model: type, rows: list[dict[str, Any]]) -> None
         await session.execute(stmt)
 
 
+async def _bump_sequence(session, model: type) -> None:
+    """Upserting production's own explicit `id` values never advances this
+    table's local serial sequence — so a later local-only insert into the
+    same table (e.g. a login Activity row) can collide with an id a sync
+    page just claimed. Move the sequence past the current max after every
+    upsert so local inserts never reuse one.
+    """
+    table = model.__table__
+    max_id = await session.scalar(sa.select(sa.func.max(table.c.id)))
+    if max_id is None:
+        return
+    await session.execute(
+        sa.text("SELECT setval(pg_get_serial_sequence(:table, 'id'), :max_id)"),
+        {"table": table.name, "max_id": max_id},
+    )
+
+
+async def _sync_photo_files(client: httpx.AsyncClient, rows: list[dict[str, Any]]) -> None:
+    """A tag_images row only carries a path string — the actual file was
+    never part of it (see app/api/v1/sync.py::sync_tag_images). Download the
+    real bytes for any row this page just referenced that isn't already on
+    disk here, so "View Photo" works for a synced-in tag too. Naturally
+    idempotent: a row whose file already exists (a re-synced duplicate, or a
+    previous cycle that already fetched it) is simply skipped.
+    """
+    for row in rows:
+        target = local_path_for(row["stored_path"])
+        if target.is_file():
+            continue
+        try:
+            response = await client.get(f"/api/v1/sync/tag-images/{row['id']}/file")
+            response.raise_for_status()
+        except Exception:
+            logger.exception("Could not fetch photo file for tag_image %s", row["id"])
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(response.content)
+
+
+async def fetch_missing_photo(image_id: int, stored_path: str) -> Path | None:
+    """On-demand fallback for a tag_images row whose file isn't on disk here —
+    used by app/api/v1/batches.py::get_batch_image when resolve_stored 404s.
+    Covers rows pulled in by a page that ran before _sync_photo_files existed
+    (their sync cursor has already moved past them, so the pull loop above
+    will never revisit them). No-op on production itself (sync_source_url
+    unset), same guard as run_sync_loop.
+    """
+    if not settings.sync_source_url or not settings.sync_api_token:
+        return None
+    headers = {"Authorization": f"Bearer {settings.sync_api_token}"}
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.sync_source_url, headers=headers, timeout=30.0
+        ) as client:
+            response = await client.get(f"/api/v1/sync/tag-images/{image_id}/file")
+            response.raise_for_status()
+    except Exception:
+        logger.exception("Could not fetch photo file for tag_image %s", image_id)
+        return None
+    target = local_path_for(stored_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(response.content)
+    return target
+
+
 async def _cursor_for(session, resource: str) -> SyncCursor:
     cursor = await session.get(SyncCursor, resource)
     if cursor is None:
@@ -129,6 +196,9 @@ async def _sync_one_page(client: httpx.AsyncClient, resource: str, path: str, mo
             return False
 
         await _upsert_page(session, model, rows)
+        await _bump_sequence(session, model)
+        if resource == "tag_images":
+            await _sync_photo_files(client, rows)
 
         last = rows[-1]
         cursor.since_updated_at = datetime.fromisoformat(last["updated_at"])
