@@ -97,14 +97,22 @@ as "10/24" means month 10, year 2024 — record both and say so in remarks.
 captured by one of the dedicated fields above, as "LABEL: value" pairs \
 separated by ", " — body/trim materials, standards, pressure and temperature \
 ratings, certificate numbers, calibration data, drawing numbers, supply \
-voltages. Do not add an entry that merely restates a value already recorded \
-in a dedicated field (e.g. no plain "MONTH: 02" or "YEAR: 2024" line, since \
-those live in month_of_manufacture / year_of_manufacture). A composite code \
+voltages. Before adding any entry, check it against every dedicated field's \
+captured value (size_dimension, hazardous_classification, year/month of \
+manufacture, and all others) and omit it if it already appears there in any \
+form — do not restate a value already recorded in a dedicated field (e.g. no \
+plain "MONTH: 02" or "YEAR: 2024" line, since those live in \
+month_of_manufacture / year_of_manufacture; no "CLASS: 150RF" line if that \
+class was already folded into size_dimension per rule 12). A composite code \
 printed on the plate in its own right — such as a date code like "02/24" — \
 is still transcribed once as printed, since it documents the plate's own \
 notation, not a restatement.
-7. "hazardous_classification": the full ATEX/IECEx marking including certificate \
-numbers, ingress rating and temperature class, if present.
+7. "hazardous_classification": capture the complete classification exactly as \
+printed, in full — the ATEX/IECEx marking including certificate numbers, \
+ingress rating, temperature class, and group/category markings, if present. \
+Pay particular attention to markings starting "EX" (e.g. "EX II 2GD C \
+LCIE"): transcribe the entire string verbatim. Never shorten, split, or move \
+any part of it to additional_information.
 8. "remarks": a short note naming anything a human should check — what was \
 illegible, what was inferred and from where, and any mismatch between the tag \
 number in the filename and one printed on the plate. Empty string if nothing.
@@ -118,6 +126,14 @@ follows. Do not alter the identifier itself: keep every letter, digit, \
 hyphen and slash that is part of the value, in the order printed. These \
 identifiers are not necessarily numeric — "P/N: AB-123-CD" is "AB-123-CD", \
 not a digits-only reading of it.
+12. "size_dimension": capture the size together with any class, pressure \
+rating, or schedule printed immediately alongside it, as one value — e.g. a \
+plate reading 3/4" 150RF becomes size_dimension = "3/4\" 150RF". Never split \
+them, and never move the class/rating half into additional_information.
+
+Before returning the JSON, validate: size_dimension includes its class/rating; \
+no dedicated field's value is repeated in additional_information; and \
+hazardous_classification holds the complete "EX..." string unmodified.
 """
 
 

@@ -78,6 +78,15 @@ class Settings(BaseSettings):
         alias="TEMPLATE_OUTPUT_PATH_PREFIX",
     )
 
+    # ── Signed download links (see app.services.download_links) ────────────────
+    # The AI OUTPUT EXCEL / INPUT PHOTO hyperlinks embedded in an exported
+    # workbook must resolve on whatever machine later opens that file, not just
+    # this server — so they point at this public URL rather than a local path.
+    public_base_url: str = Field("http://localhost:8000", alias="PUBLIC_BASE_URL")
+    # These workbooks are long-lived reference documents, not one-time shares,
+    # so the signed link is deliberately long-lived rather than short-expiry.
+    download_link_expire_days: int = Field(365, alias="DOWNLOAD_LINK_EXPIRE_DAYS")
+
     # ── Production -> local sync ─────────────────────────────────────────────
     # Shared secret, set identically in both environments' .env files.
     # Production uses it to authenticate incoming pulls (app/api/v1/sync.py);

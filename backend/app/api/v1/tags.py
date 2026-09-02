@@ -12,6 +12,7 @@ from app.core.deps import CurrentUser, DbSession
 from app.models import Activity, ActivityAction, AssetTag, BatchItem, ItemStatus, TagImage, User, UserRole
 from app.schemas.common import Page
 from app.schemas.tag import AssetTagOut, SaveTagRequest, SearchResultOut
+from app.services.download_links import ai_excel_download_url, photo_view_url, verify_ai_excel_token
 from app.services.excel_template import build_template_workbook
 from app.services.fields import normalise_payload
 from app.services.filename_parser import excel_basename, safe_filename
@@ -244,6 +245,10 @@ async def download_all_templates(user: CurrentUser, db: DbSession) -> Response:
             "ai_payload": tag.ai_payload,
             "input_photos": input_cell,
             "output_file": output_cell,
+            "ai_excel_url": ai_excel_download_url(tag.tag_number),
+            "input_photo_url": (
+                photo_view_url(tag.tag_number) if tag.tag_number in photos_by_tag else None
+            ),
         })
 
     content = build_template_workbook(records)
@@ -294,15 +299,17 @@ async def save_tag(
     tag.edited_by_id = user.id
     tag.revision += 1
 
-    photo_names = list(
-        (await db.scalars(
-            select(TagImage.original_filename)
+    photo_rows = (
+        await db.execute(
+            select(TagImage.original_filename, TagImage.stored_path)
             .join(BatchItem, BatchItem.id == TagImage.item_id)
             .where(BatchItem.tag_number == tag.tag_number)
             .order_by(TagImage.id)
-        )).all()
-    )
-    await generate_workbooks(db, tag, photo_names or [f"{tag.tag_number}.jpg"])
+        )
+    ).all()
+    photo_names = [r[0] for r in photo_rows]
+    photo_paths = [r[1] for r in photo_rows]
+    await generate_workbooks(db, tag, photo_names or [f"{tag.tag_number}.jpg"], photo_paths)
 
     db.add(Activity(
         user_id=user.id, action=ActivityAction.EDIT,
@@ -314,7 +321,11 @@ async def save_tag(
     return _out(tag, await _username_of(db, tag))
 
 
-async def _download(db, tag: AssetTag, kind: str, user) -> FileResponse:
+async def _download(db, tag: AssetTag, kind: str, user: User | None) -> FileResponse:
+    """`user` is None for a signed-link download (see the /download/ai-link
+    route below) — Excel's hyperlink click carries no bearer token, so there's
+    no logged-in user to attribute the download to.
+    """
     path_str = tag.ai_excel_path if kind == "ai" else tag.template_excel_path
     if not path_str:
         raise HTTPException(
@@ -328,8 +339,8 @@ async def _download(db, tag: AssetTag, kind: str, user) -> FileResponse:
         # the row, including both payloads, replicates — the generated file on disk
         # never does. Rebuild it here from the payload data, which did sync.
         try:
-            photo_names, _ = await _photo_names_and_paths(db, tag.tag_number)
-            await generate_workbooks(db, tag, photo_names)
+            photo_names, photo_paths = await _photo_names_and_paths(db, tag.tag_number)
+            await generate_workbooks(db, tag, photo_names, photo_paths)
             await db.commit()
             path = resolve_stored(
                 tag.ai_excel_path if kind == "ai" else tag.template_excel_path
@@ -341,10 +352,12 @@ async def _download(db, tag: AssetTag, kind: str, user) -> FileResponse:
                 "The workbook file is missing from storage and could not be rebuilt.",
             ) from None
 
+    workbook_kind = "AI Output" if kind == "ai" else "Template"
     db.add(Activity(
-        user_id=user.id, action=ActivityAction.DOWNLOAD,
+        user_id=user.id if user else None, action=ActivityAction.DOWNLOAD,
         tag_number=tag.tag_number, description=tag.description,
-        detail=f"Downloaded {'AI Output' if kind == 'ai' else 'Template'} workbook",
+        detail=f"Downloaded {workbook_kind} workbook"
+               + ("" if user else " (via AI OUTPUT EXCEL link)"),
     ))
     await db.commit()
 
@@ -354,6 +367,25 @@ async def _download(db, tag: AssetTag, kind: str, user) -> FileResponse:
 @router.get("/{tag_id}/download/ai")
 async def download_ai(tag_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
     return await _download(db, await _get_tag(db, tag_id), "ai", user)
+
+
+@router.get("/download/ai-link")
+async def download_ai_by_link(token: str, db: DbSession) -> FileResponse:
+    """Unauthenticated counterpart to `download_ai`, for the AI OUTPUT EXCEL
+    hyperlink embedded in an exported Template workbook — see
+    app.services.download_links. Guarded by a signed, expiring, tag-scoped
+    token instead of CurrentUser, since a hyperlink click carries no bearer
+    token for the SPA's normal auth to check.
+    """
+    tag_number = verify_ai_excel_token(token)
+    if tag_number is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "This download link is invalid or has expired."
+        )
+    tag = await db.scalar(select(AssetTag).where(AssetTag.tag_number == tag_number))
+    if tag is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That tag no longer exists.")
+    return await _download(db, tag, "ai", None)
 
 
 @router.get("/{tag_id}/download/template")

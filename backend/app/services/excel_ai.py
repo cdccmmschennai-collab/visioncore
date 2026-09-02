@@ -16,8 +16,13 @@ from __future__ import annotations
 from io import BytesIO
 
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.units import pixels_to_EMU
+from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 
 from app.services.fields import (
     FIELDS,
@@ -48,6 +53,72 @@ BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 # Rows that need extra height because their content wraps.
 TALL_ROWS = {"hazardous_classification": 33.0, "additional_information": 48.0}
 
+# ── Input Image(s) column ────────────────────────────────────────────────────
+IMAGE_COLUMN = 5  # E — one past the printed Field/Value/Quality table
+IMAGE_COL_WIDTH = 50.0
+IMAGE_MAX_W, IMAGE_MAX_H = 500, 500   # px — thumbnail box, for display only
+IMAGE_PAD = 6                          # px — left/top padding inside the cell
+IMAGE_GAP = 10                         # px — gap between stacked photos
+
+
+def _prepare_thumbnail(data: bytes) -> tuple[BytesIO, tuple[int, int]] | None:
+    """Decode one uploaded photo and fit it to the workbook's thumbnail box.
+
+    Runs through Pillow so JPG/PNG/WEBP/etc. all normalise to PNG bytes
+    openpyxl can embed, aspect ratio preserved. Never raises — a corrupt or
+    unreadable photo is simply skipped, same as a missing one.
+    """
+    try:
+        img = PILImage.open(BytesIO(data))
+        img.load()
+    except (UnidentifiedImageError, OSError):
+        return None
+    img = ImageOps.exif_transpose(img) or img
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+
+    ratio = min(IMAGE_MAX_W / img.width, IMAGE_MAX_H / img.height, 1.0)
+    size = (max(1, round(img.width * ratio)), max(1, round(img.height * ratio)))
+    img = img.resize(size, PILImage.Resampling.LANCZOS)
+
+    out = BytesIO()
+    img.save(out, format="PNG")
+    out.seek(0)
+    return out, size
+
+
+def _embed_images(ws, images: list[bytes], header_style: tuple, top_row: int, bottom_row: int) -> None:
+    """Add the 'Input Image(s)' column and embed each decodable photo in it."""
+    header_font, header_fill, centred, border = header_style
+    col_letter = get_column_letter(IMAGE_COLUMN)
+    ws.column_dimensions[col_letter].width = IMAGE_COL_WIDTH
+
+    header = ws.cell(row=4, column=IMAGE_COLUMN, value="Input Image(s)")
+    header.font, header.fill, header.alignment, header.border = (
+        header_font, header_fill, centred, border,
+    )
+    ws.merge_cells(start_row=top_row, start_column=IMAGE_COLUMN, end_row=bottom_row, end_column=IMAGE_COLUMN)
+    for r in range(top_row, bottom_row + 1):
+        ws.cell(row=r, column=IMAGE_COLUMN).border = border
+
+    y_offset = IMAGE_PAD
+    for data in images:
+        thumb = _prepare_thumbnail(data)
+        if thumb is None:
+            continue
+        buffer, (w_px, h_px) = thumb
+        xl_img = XLImage(buffer)
+        xl_img.width, xl_img.height = w_px, h_px
+        marker = AnchorMarker(
+            col=IMAGE_COLUMN - 1, colOff=pixels_to_EMU(IMAGE_PAD),
+            row=top_row - 1, rowOff=pixels_to_EMU(y_offset),
+        )
+        xl_img.anchor = OneCellAnchor(
+            _from=marker, ext=XDRPositiveSize2D(pixels_to_EMU(w_px), pixels_to_EMU(h_px)),
+        )
+        ws.add_image(xl_img)
+        y_offset += h_px + IMAGE_GAP
+
 
 def _sheet_title(tag_number: str, description: str) -> str:
     """Excel caps sheet names at 31 chars and forbids : \\ / ? * [ ]."""
@@ -58,7 +129,8 @@ def _sheet_title(tag_number: str, description: str) -> str:
 
 
 def build_ai_workbook(payload: dict, tag_number: str, description: str,
-                      source_filenames: list[str]) -> bytes:
+                      source_filenames: list[str],
+                      images: list[bytes] | None = None) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = _sheet_title(tag_number, description)
@@ -137,6 +209,9 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
     ws.row_dimensions[row].height = 48.0
     remarks_row = row
 
+    if images:
+        _embed_images(ws, images, (header_font, header_fill, centred, BORDER), 5, remarks_row)
+
     # ── Legend, one blank row below the table ────────────────────────────────
     legend_row = remarks_row + 2
     ws.cell(row=legend_row, column=1, value="Data Quality Legend").font = Font(
@@ -165,7 +240,8 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
         note_cell.font = Font(name="Calibri", size=10, color=SUBTITLE_COLOR)
         note_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
-    ws.print_area = f"A1:C{legend_row + len(legend)}"
+    last_col = get_column_letter(IMAGE_COLUMN) if images else "C"
+    ws.print_area = f"A1:{last_col}{legend_row + len(legend)}"
     ws.page_setup.orientation = "portrait"
     ws.page_setup.fitToWidth = 1
     for col in range(1, 4):
