@@ -153,6 +153,14 @@ async function blobUrl(path: string): Promise<string> {
   return URL.createObjectURL(await response.blob())
 }
 
+/** Fetch an authenticated file as a raw Blob — used to hand workbook bytes
+ * to the local helper (see src/services/localHelper.ts) without triggering
+ * a browser download. */
+async function fetchBlob(path: string): Promise<Blob> {
+  const response = await request<Response>(path, { raw: true })
+  return response.blob()
+}
+
 export const api = {
   // ── auth ────────────────────────────────────────────────────────────────
   login: (username: string, password: string, remember_me: boolean) =>
@@ -216,6 +224,10 @@ export const api = {
       `${tag.tag_number}-${tag.description}-Template.xlsx`),
   downloadAllTemplates: () =>
     download('/tags/download-all/template', 'All-Tags-Template.xlsx'),
+  // Same endpoints as downloadAi/downloadTemplate above, as raw bytes instead
+  // of a browser download — used by src/services/localHelper.ts.
+  fetchAiBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/ai`),
+  fetchTemplateBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/template`),
   searchTags: (params: { field: string; value: string; page?: number; pageSize?: number }) => {
     const query = new URLSearchParams({
       field: params.field,

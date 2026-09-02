@@ -4,6 +4,7 @@ import EditableTable from '@/components/EditableTable'
 import Spinner from '@/components/Spinner'
 import { ApiError, api } from '@/api/client'
 import type { AssetTag, ExtractionPayload } from '@/api/types'
+import { pushTemplateRevision } from '@/services/localHelper'
 import { useToast } from '@/store/ToastContext'
 
 /** Opening a single saved tag from Home or History. */
@@ -35,6 +36,7 @@ export default function TagDetail() {
         const updated = await api.saveTag(tag.id, payload)
         setTag(updated)
         toast.success(`Saved ${updated.tag_number}. Both workbooks were rebuilt.`)
+        void pushTemplateRevision(updated)
       } catch (caught) {
         toast.error(caught instanceof ApiError ? caught.message : 'Could not save those changes.')
         throw caught

@@ -8,6 +8,7 @@ import StatusRail from '@/components/StatusRail'
 import { api } from '@/api/client'
 import type { AssetTag, Batch, ExtractionPayload, ItemStatus, RejectedFile } from '@/api/types'
 import { LIMITS } from '@/config'
+import { pushExtractedWorkbooks, pushTemplateRevision } from '@/services/localHelper'
 import { formatFileSize } from '@/utils/filename'
 import { stagedGroup, type StagedFile } from '@/utils/upload'
 import { useToast } from '@/store/ToastContext'
@@ -47,6 +48,11 @@ export default function NewBatch() {
   const [retryingIds, setRetryingIds] = useState<Set<number>>(new Set())
   const pollRef = useRef<number | null>(null)
   const dropzoneRef = useRef<DropzoneHandle>(null)
+  // Batch items already auto-saved to the local helper this session, so a
+  // freshly-completed tag is pushed exactly once — not on every poll tick,
+  // and not again for a tag that was already completed before this page
+  // was opened (see the "load existing batch" effect below, which seeds this).
+  const autoSavedRef = useRef<Set<number>>(new Set())
 
   const toggleDetails = (itemId: number) => {
     setExpandedItems((prev) => {
@@ -74,6 +80,14 @@ export default function NewBatch() {
         try {
           const fresh = await api.getBatch(batchId)
           setBatch(fresh)
+          // Auto-save AI Output + Template Output to the local helper the
+          // moment a tag's extraction completes — once per item, ever.
+          fresh.items.forEach((item) => {
+            if (item.status === 'completed' && item.asset_tag && !autoSavedRef.current.has(item.id)) {
+              autoSavedRef.current.add(item.id)
+              void pushExtractedWorkbooks(item.asset_tag)
+            }
+          })
           // A retried item is done once it leaves the active pipeline states.
           setRetryingIds((prev) => {
             if (prev.size === 0) return prev
@@ -128,6 +142,11 @@ export default function NewBatch() {
       .then((fetched) => {
         if (cancelled) return
         setBatch(fetched)
+        // Already-completed items belong to a past session — mark them seen
+        // so re-opening this batch from History doesn't re-trigger a push.
+        fetched.items.forEach((item) => {
+          if (item.status === 'completed' && item.asset_tag) autoSavedRef.current.add(item.id)
+        })
         if (!TERMINAL.has(fetched.status)) startPolling(fetched.id)
       })
       .catch(() => { if (!cancelled) toast.error('Could not load that batch.') })
@@ -209,9 +228,10 @@ export default function NewBatch() {
 
   const saveTag = async (tag: AssetTag, payload: ExtractionPayload) => {
     try {
-      await api.saveTag(tag.id, payload)
+      const updated = await api.saveTag(tag.id, payload)
       await refreshBatch()
       toast.success(`Saved ${tag.tag_number}. Both workbooks have been rebuilt.`)
+      void pushTemplateRevision(updated)
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : 'Could not save the tag.')
       throw caught
