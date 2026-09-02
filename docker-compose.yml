@@ -42,6 +42,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       STORAGE_DIR: /data/storage
+      # The container's own view of the host's Batch Process folder — see the
+      # bind mount below and app/services/batch_process.py. Overridable via
+      # BATCH_PROCESS_SOURCE_DIR in .env if the host folder ever moves.
+      BATCH_PROCESS_SOURCE_DIR: /data/batch-process
     depends_on:
       db:
         condition: service_healthy
@@ -49,6 +53,9 @@ services:
         condition: service_healthy
     volumes:
       - storage:/data/storage
+      # Bind mount (not a named volume) so the "Batch Process" button reads
+      # and writes the real Windows folder directly, not a Docker-only copy.
+      - "C:/Asset photo-Tag extraction:/data/batch-process"
     ports:
       - "8000:8000"
 

@@ -49,6 +49,13 @@ export default function History() {
   const [viewingBatchId, setViewingBatchId] = useState<number | null>(null)
   const [viewingItemId, setViewingItemId] = useState<number | null>(null)
 
+  // Checkbox-driven download selection. `allSelected` and individual tags are
+  // mutually exclusive — checking All clears individual picks (and disables
+  // their checkboxes, since "all" spans every completed tag, not just what's
+  // on this page); picking a tag only ever applies while All is unchecked.
+  const [allSelected, setAllSelected] = useState(false)
+  const [selectedTagNumbers, setSelectedTagNumbers] = useState<Set<string>>(new Set())
+
   // Debounce so a fast typist doesn't fire a request per keystroke.
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -134,6 +141,40 @@ export default function History() {
     }
   }
 
+  const toggleTag = (tagNumber: string) => {
+    setSelectedTagNumbers((prev) => {
+      const next = new Set(prev)
+      if (next.has(tagNumber)) next.delete(tagNumber)
+      else next.add(tagNumber)
+      return next
+    })
+  }
+
+  const toggleAll = (checked: boolean) => {
+    setAllSelected(checked)
+    if (checked) setSelectedTagNumbers(new Set())
+  }
+
+  const [downloadingSelected, setDownloadingSelected] = useState(false)
+  const downloadSelected = async () => {
+    if (!allSelected && selectedTagNumbers.size === 0) {
+      toast.warn('Select at least one completed tag, or check All, before downloading.')
+      return
+    }
+    setDownloadingSelected(true)
+    try {
+      const name = allSelected
+        ? await api.downloadAllTemplates()
+        : await api.downloadSelectedTemplates([...selectedTagNumbers])
+      toast.success(`Downloaded ${name}`)
+      void load()
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Download failed.')
+    } finally {
+      setDownloadingSelected(false)
+    }
+  }
+
   return (
     <div className="page stack gap-24">
       <header className="page-head">
@@ -157,6 +198,14 @@ export default function History() {
             onChange={setSearch}
             placeholder="Search tag number or description"
           />
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={downloadingSelected}
+            onClick={() => void downloadSelected()}
+          >
+            {downloadingSelected ? 'Downloading…' : 'Download Selected (Template)'}
+          </button>
           <button
             type="button"
             className="btn btn-sm btn-primary"
@@ -185,6 +234,15 @@ export default function History() {
             <table className="data">
               <thead>
                 <tr>
+                  <th style={{ width: 32 }}>
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={(event) => toggleAll(event.target.checked)}
+                      aria-label="Select all completed tags"
+                      title="Select all completed tags"
+                    />
+                  </th>
                   <th>Date</th>
                   <th>Time</th>
                   <th>Tag Number</th>
@@ -219,6 +277,17 @@ export default function History() {
                       className={openable ? 'row-clickable' : undefined}
                       onClick={openable ? () => openTag(row.asset_tag_id!) : undefined}
                     >
+                      <td onClick={(event) => event.stopPropagation()}>
+                        {row.action === 'extract' && row.tag_number && (
+                          <input
+                            type="checkbox"
+                            checked={allSelected || selectedTagNumbers.has(row.tag_number)}
+                            disabled={allSelected}
+                            onChange={() => toggleTag(row.tag_number!)}
+                            aria-label={`Select ${row.tag_number}`}
+                          />
+                        )}
+                      </td>
                       <td className="nowrap">{date}</td>
                       <td className="nowrap muted">{time}</td>
                       <td>

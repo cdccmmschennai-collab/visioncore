@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Enum, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -29,6 +29,10 @@ class Batch(Base, TimestampMixin):
     )
     total_images: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tags: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # True only for a batch created by the "Batch Process" folder scan (see
+    # app/services/batch_process.py) — gates the extra AI Extraction /
+    # Consolidate file exports so a normal upload's behaviour is untouched.
+    is_batch_process: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     user = relationship("User", back_populates="batches")
     items = relationship(

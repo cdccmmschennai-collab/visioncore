@@ -1,23 +1,21 @@
 """Upload, status polling, editing and workbook download."""
 from __future__ import annotations
 
-import hashlib
+import html
 import os
 import secrets
 from collections import OrderedDict
 from datetime import datetime, timezone
-from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession
 from app.models import (
-    Activity,
-    ActivityAction,
     AssetTag,
     Batch,
     BatchItem,
@@ -37,6 +35,8 @@ from app.schemas.tag import (
     SaveTagRequest,
     UploadResponse,
 )
+from app.services.batch_ingest import create_batch_with_items
+from app.services.batch_process import BatchProcessError, reextract_batch_process_item, run_batch_process, scan_tag_folders
 from app.services.claude_extractor import ALLOWED_MEDIA_TYPES
 from app.services.download_links import verify_photo_token
 from app.services.fields import normalise_payload
@@ -48,15 +48,11 @@ from app.services.filename_parser import (
     safe_filename,
 )
 from app.services.pipeline import generate_workbooks, process_batch, reextract_item
-from app.services.storage import ai_output_name, resolve_stored, save_upload, template_output_name
+from app.services.storage import ai_output_name, resolve_stored, template_output_name
 from app.services.sync_client import fetch_missing_photo
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
-_MEDIA_BY_EXT = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg",
-    ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
-}
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -204,93 +200,48 @@ async def upload(
         )
 
     reference = f"B-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
-    batch = Batch(
-        reference=reference,
-        user_id=user.id,
-        status=BatchStatus.UPLOADED,
-        total_images=sum(len(g["files"]) for g in grouped.values()),
-        total_tags=len(grouped),
-    )
-    db.add(batch)
-    await db.flush()
+    batch, duplicate_tags = await create_batch_with_items(db, reference, grouped, user)
+    duplicates = [_asset_tag_out(t) for t in duplicate_tags]
 
-    duplicates: list[AssetTagOut] = []
-
-    for tag_number, group in grouped.items():
-        existing = await db.scalar(select(AssetTag).where(AssetTag.tag_number == tag_number))
-
-        item = BatchItem(
-            batch_id=batch.id,
-            tag_number=tag_number,
-            description=group["description"],
-            status=ItemStatus.DUPLICATE if existing else ItemStatus.UPLOADED,
-            error_message="Tag already extracted" if existing else None,
-            asset_tag_id=existing.id if existing else None,
-        )
-        db.add(item)
-        await db.flush()
-
-        for original_name, data in group["files"]:
-            content_hash = hashlib.sha256(data).hexdigest()
-
-            # Same bytes already stored somewhere (any batch, any tag) — point
-            # this row at that file instead of writing a second copy. But a
-            # row pulled in by app/services/sync_client.py can carry a
-            # stored_path whose file was never actually fetched down here —
-            # reusing that dangling path would silently drop the bytes we
-            # were just handed. Fall back to a real write when it doesn't
-            # resolve, so the upload is never lost.
-            duplicate = await db.scalar(
-                select(TagImage.stored_path)
-                .where(TagImage.content_hash == content_hash)
-                .limit(1)
-            )
-            stored_path = None
-            if duplicate is not None:
-                try:
-                    resolve_stored(duplicate)
-                    stored_path, suffix = duplicate, Path(duplicate).suffix
-                except (FileNotFoundError, ValueError):
-                    stored_path = None
-            if stored_path is None:
-                stored = save_upload(reference, tag_number, original_name, data)
-                stored_path, suffix = str(stored), stored.suffix
-
-            db.add(TagImage(
-                item_id=item.id,
-                original_filename=original_name,
-                stored_path=stored_path,
-                content_hash=content_hash,
-                media_type=_MEDIA_BY_EXT.get(suffix.lower(), "image/jpeg"),
-                size_bytes=len(data),
-            ))
-
-        if existing:
-            duplicates.append(_asset_tag_out(existing))
-            db.add(Activity(
-                user_id=user.id, action=ActivityAction.DUPLICATE_BLOCKED,
-                tag_number=tag_number, description=group["description"],
-                detail="Tag already extracted \u2014 existing record shown",
-            ))
-        else:
-            # One row per tag, mirroring Extract/Edit/Download, so History (and
-            # "View Photos") can show this tag's number/description directly
-            # instead of a batch-wide summary.
-            db.add(Activity(
-                user_id=user.id, action=ActivityAction.UPLOAD,
-                tag_number=tag_number, description=group["description"],
-                detail=f"Uploaded {len(group['files'])} image(s)",
-                meta={"batch_reference": reference, "batch_id": batch.id, "item_id": item.id},
-            ))
-
-    await db.commit()
-
-    if any(g for tag, g in grouped.items()
-           if not any(d.tag_number == tag for d in duplicates)):
+    duplicate_numbers = {t.tag_number for t in duplicate_tags}
+    if any(tag_number not in duplicate_numbers for tag_number in grouped):
         background.add_task(process_batch, batch.id, user.id)
 
     batch = await _load_batch(db, batch.id, user)
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
+
+
+@router.post("/batch-process", response_model=BatchOut, status_code=status.HTTP_201_CREATED)
+async def batch_process(
+    user: CurrentUser, db: DbSession, background: BackgroundTasks
+) -> BatchOut:
+    """Scan the Batch Process source folder and extract every tag subfolder
+    found there through the same pipeline `upload()` uses above.
+
+    See app/services/batch_process.py for the folder layout, the per-tag
+    "AI Extraction" export and the consolidated workbook this also produces.
+    """
+    try:
+        found = scan_tag_folders()
+    except BatchProcessError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    if not found:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No tag folders with images were found to process.",
+        )
+
+    reference = f"BP-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
+    grouped: OrderedDict[str, dict] = OrderedDict()
+    for tag_number, description, files in found:
+        grouped[tag_number] = {"description": description, "files": files}
+
+    batch, _duplicates = await create_batch_with_items(
+        db, reference, grouped, user, is_batch_process=True
+    )
+    background.add_task(run_batch_process, batch.id, user.id)
+
+    return _batch_out(await _load_batch(db, batch.id, user))
 
 
 @router.get("/by-status", response_model=Page[BatchOut])
@@ -392,7 +343,12 @@ async def get_batch(batch_id: int, user: CurrentUser, db: DbSession) -> BatchOut
 async def retry_item(
     batch_id: int, item_id: int, user: CurrentUser, db: DbSession, background: BackgroundTasks
 ) -> BatchItemOut:
-    """Re-extract one failed tag in place — no new batch, tag, or image rows."""
+    """Re-extract one failed tag in place — no new batch, tag, or image rows.
+
+    Same "Re-Extract" button either way, but a Batch Process batch also needs
+    its AI Extraction copy and consolidated workbook refreshed once the retry
+    lands — see app/services/batch_process.py.
+    """
     batch = await _load_batch(db, batch_id, user)
     item = next((i for i in batch.items if i.id == item_id), None)
     if item is None:
@@ -404,7 +360,10 @@ async def retry_item(
     batch.status = BatchStatus.PROCESSING
     await db.commit()
 
-    background.add_task(reextract_item, item.id, batch.id, user.id)
+    if batch.is_batch_process:
+        background.add_task(reextract_batch_process_item, item.id, batch.id, user.id)
+    else:
+        background.add_task(reextract_item, item.id, batch.id, user.id)
     return _item_out(item)
 
 
@@ -466,31 +425,69 @@ async def get_batch_image(
     return await _serve_image(image)
 
 
+def _photo_gallery_html(tag_number: str, token: str, count: int) -> str:
+    """Simple unstyled gallery so a multi-photo tag's single INPUT PHOTO
+    hyperlink can still reach every photo — one click each, same signed
+    token, just a different `index`.
+    """
+    safe_tag = html.escape(tag_number)
+    safe_token = quote(token)
+    thumbs = "".join(
+        f'<a href="/api/v1/batches/images/photo-link?token={safe_token}&index={i}" target="_blank">'
+        f'<img src="/api/v1/batches/images/photo-link?token={safe_token}&index={i}" alt="Photo {i + 1}"></a>'
+        for i in range(count)
+    )
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{safe_tag} photos</title>
+<style>
+body {{ font-family: Arial, sans-serif; background:#f5f6f8; margin:0; padding:24px; }}
+h1 {{ font-size:16px; margin:0 0 16px; }}
+.grid {{ display:flex; flex-wrap:wrap; gap:16px; }}
+.grid img {{ max-width:280px; max-height:280px; border:1px solid #ccc; border-radius:4px; object-fit:cover; }}
+</style></head>
+<body><h1>{safe_tag} — {count} input photos</h1><div class="grid">{thumbs}</div></body></html>"""
+
+
 @router.get("/images/photo-link")
-async def get_photo_by_link(token: str, db: DbSession) -> FileResponse:
+async def get_photo_by_link(
+    token: str, db: DbSession, index: int | None = Query(None, ge=0)
+) -> Response:
     """Unauthenticated counterpart to `get_batch_image`, for the INPUT PHOTO
     hyperlink embedded in an exported Template workbook — see
     app.services.download_links. Guarded by a signed, expiring, tag-scoped
-    token instead of CurrentUser, and resolves to that tag's current first
-    photo (by TagImage.id) rather than a fixed image_id, so the link keeps
-    working even if the tag's photos are re-uploaded later.
+    token instead of CurrentUser.
+
+    A tag with exactly one photo behaves exactly as before — the link opens
+    that photo directly. A tag with several photos (the INPUT PHOTO column is
+    always a single link, one per row) instead opens a small gallery page
+    linking to each one via `&index=N`, so none of them are hidden behind
+    "just the first photo" any more.
     """
     tag_number = verify_photo_token(token)
     if tag_number is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "This photo link is invalid or has expired."
         )
-    image = await db.scalar(
-        select(TagImage)
-        .join(BatchItem, BatchItem.id == TagImage.item_id)
-        .where(BatchItem.tag_number == tag_number)
-        .order_by(TagImage.id)
-        .limit(1)
-    )
-    if image is None:
+    images = (
+        await db.scalars(
+            select(TagImage)
+            .join(BatchItem, BatchItem.id == TagImage.item_id)
+            .where(BatchItem.tag_number == tag_number)
+            .order_by(TagImage.id)
+        )
+    ).all()
+    if not images:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No photo found for that tag.")
 
-    return await _serve_image(image)
+    if index is not None:
+        if index >= len(images):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No photo at that position for this tag.")
+        return await _serve_image(images[index])
+
+    if len(images) == 1:
+        return await _serve_image(images[0])
+
+    return HTMLResponse(_photo_gallery_html(tag_number, token, len(images)))
 
 
 @router.get("", response_model=list[BatchOut])

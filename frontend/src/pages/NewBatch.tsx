@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import BatchImagesModal from '@/components/BatchImagesModal'
 import Dropzone, { type DropzoneHandle } from '@/components/Dropzone'
 import EditableTable from '@/components/EditableTable'
+import Modal from '@/components/Modal'
 import Spinner from '@/components/Spinner'
 import StatusRail from '@/components/StatusRail'
 import { api } from '@/api/client'
@@ -53,6 +54,15 @@ export default function NewBatch() {
   // and not again for a tag that was already completed before this page
   // was opened (see the "load existing batch" effect below, which seeds this).
   const autoSavedRef = useRef<Set<number>>(new Set())
+  // Holds the batch id while — and only while — that batch was started by
+  // this page's own "Batch Process" click, so the completion popup below
+  // fires for that one batch and never for a normal upload or a batch
+  // reopened from History (whose id will never match).
+  const [batchProcessing, setBatchProcessing] = useState(false)
+  const batchProcessRunRef = useRef<number | null>(null)
+  const [batchProcessSummary, setBatchProcessSummary] = useState<
+    { total: number; completed: number; failed: number } | null
+  >(null)
 
   const toggleDetails = (itemId: number) => {
     setExpandedItems((prev) => {
@@ -102,7 +112,17 @@ export default function NewBatch() {
           if (TERMINAL.has(fresh.status)) {
             stopPolling()
             const failures = fresh.items.filter((item) => item.status === 'failed').length
-            if (failures === 0) toast.success('Extraction complete.')
+            // A Batch Process run gets the "File Extraction Completed" summary
+            // popup instead of a toast — everything else (normal upload,
+            // reopening a batch from History) keeps the existing toast.
+            if (batchProcessRunRef.current === fresh.id) {
+              batchProcessRunRef.current = null
+              setBatchProcessSummary({
+                total: fresh.items.length,
+                completed: fresh.items.length - failures,
+                failed: failures,
+              })
+            } else if (failures === 0) toast.success('Extraction complete.')
             else if (failures === fresh.items.length) toast.error('Extraction failed for every tag.')
             else toast.warn(`Extraction finished with ${failures} failed tag(s).`)
           }
@@ -217,6 +237,31 @@ export default function NewBatch() {
     }
   }
 
+  /** Scan the server's Batch Process folder and extract every tag subfolder
+   * found there — same pipeline as a normal upload, just server-triggered.
+   * Stays on this page (no navigation) so the whole run — per-tag status,
+   * overall progress, and the completion popup — is watched right here,
+   * the same way a normal upload's progress already is. */
+  const runBatchProcess = async () => {
+    setBatchProcessing(true)
+    setBatchProcessSummary(null)
+    try {
+      const started = await api.batchProcess()
+      batchProcessRunRef.current = started.id
+      setBatch(started)
+      setRejected([])
+      setFiles([])
+      toast.success(
+        `Batch Process started — extracting ${started.total_tags} tag${started.total_tags === 1 ? '' : 's'}…`,
+      )
+      startPolling(started.id)
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not start Batch Process.')
+    } finally {
+      setBatchProcessing(false)
+    }
+  }
+
   const refreshBatch = useCallback(async () => {
     if (!batch) return
     try {
@@ -252,10 +297,18 @@ export default function NewBatch() {
     setBatch(null)
     setRejected([])
     setFiles([])
+    batchProcessRunRef.current = null
+    setBatchProcessSummary(null)
     navigate('/batch', { replace: true, state: { fresh: true } })
   }
 
   const busy = batch !== null && !TERMINAL.has(batch.status)
+
+  // Tags that have reached a per-item terminal state (finished either way),
+  // e.g. "10/50 completed" — same idea as the progress ring, just as a count.
+  const finishedCount = batch
+    ? batch.items.filter((item) => item.status === 'completed' || item.status === 'failed' || item.status === 'duplicate').length
+    : 0
 
   const progressPercent = batch && batch.items.length > 0
     ? Math.round(
@@ -277,6 +330,16 @@ export default function NewBatch() {
         </div>
         <div className="row gap-12 wrap">
           {batch && <span className="chip chip-neutral">{batch.reference}</span>}
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={runBatchProcess}
+            disabled={batchProcessing}
+            title="Extract every tag folder under the server's Batch Process source folder"
+          >
+            {batchProcessing ? <Spinner size={14} /> : null}
+            {batchProcessing ? 'Scanning…' : 'Batch Process'}
+          </button>
           <button type="button" className="btn btn-primary" onClick={startOver}>
             New Batch
           </button>
@@ -358,7 +421,7 @@ export default function NewBatch() {
             )}
             <span className="spacer" />
             <span className="muted">
-              {batch.total_tags} tag{batch.total_tags === 1 ? '' : 's'} ·{' '}
+              {finishedCount}/{batch.total_tags} tag{batch.total_tags === 1 ? '' : 's'} completed ·{' '}
               {batch.total_images} image{batch.total_images === 1 ? '' : 's'}
             </span>
           </div>
@@ -445,6 +508,28 @@ export default function NewBatch() {
         itemId={viewingItemId}
         onClose={() => { setViewingBatchId(null); setViewingItemId(null) }}
       />
+
+      <Modal
+        open={batchProcessSummary !== null}
+        title="File Extraction Completed"
+        onClose={() => setBatchProcessSummary(null)}
+        footer={
+          <button type="button" className="btn btn-primary" onClick={() => setBatchProcessSummary(null)}>
+            Close
+          </button>
+        }
+      >
+        {batchProcessSummary && (
+          <div className="stack gap-8">
+            <p>Total Tags: {batchProcessSummary.total}</p>
+            <p>Completed: {batchProcessSummary.completed}</p>
+            <p>Failed: {batchProcessSummary.failed}</p>
+            {batchProcessSummary.failed > 0 && (
+              <p className="muted">Please use the &quot;Re-extract&quot; button for the failed tags.</p>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }
