@@ -206,7 +206,13 @@ async def search_tags(
 
 
 @router.get("/download-all/template")
-async def download_all_templates(user: CurrentUser, db: DbSession) -> Response:
+async def download_all_templates(
+    user: CurrentUser,
+    db: DbSession,
+    tag_numbers: list[str] | None = Query(
+        None, description="Restrict the export to just these tag numbers; omit for every tag."
+    ),
+) -> Response:
     """One consolidated Template workbook, one row per unique asset tag.
 
     Reads from AssetTag (unique on tag_number) rather than the Activity log,
@@ -214,14 +220,23 @@ async def download_all_templates(user: CurrentUser, db: DbSession) -> Response:
     edited or downloaded more than once.
 
     Scoped the same way as `list_tags` above: non-admins only ever get tags
-    they personally extracted (`created_by_id`); admins get every tag.
+    they personally extracted (`created_by_id`); admins get every tag. Passing
+    `tag_numbers` (History's per-tag checkboxes) narrows the same query rather
+    than changing it, so the "download everything" call every existing caller
+    already makes — no `tag_numbers` at all — is untouched.
     """
     query = select(AssetTag).order_by(AssetTag.tag_number)
     if user.role != UserRole.ADMIN:
         query = query.where(AssetTag.created_by_id == user.id)
+    if tag_numbers:
+        query = query.where(AssetTag.tag_number.in_(tag_numbers))
     tags = (await db.scalars(query)).all()
     if not tags:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No extracted tags to export yet.")
+        detail = (
+            "None of the selected tags could be found." if tag_numbers
+            else "No extracted tags to export yet."
+        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail)
 
     photo_rows = (
         await db.execute(
@@ -255,14 +270,16 @@ async def download_all_templates(user: CurrentUser, db: DbSession) -> Response:
 
     db.add(Activity(
         user_id=user.id, action=ActivityAction.DOWNLOAD,
-        detail=f"Downloaded consolidated Template workbook ({len(tags)} tag(s))",
+        detail=f"Downloaded consolidated Template workbook "
+               f"({len(tags)} {'selected ' if tag_numbers else ''}tag(s))",
     ))
     await db.commit()
 
+    filename = "Selected-Tags-Template.xlsx" if tag_numbers else "All-Tags-Template.xlsx"
     return Response(
         content=content,
         media_type=XLSX_MEDIA,
-        headers={"Content-Disposition": 'attachment; filename="All-Tags-Template.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

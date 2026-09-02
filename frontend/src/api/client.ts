@@ -192,6 +192,9 @@ export const api = {
     })
     return request<UploadResponse>('/batches/upload', { method: 'POST', formData: form })
   },
+  // Scans the Batch Process source folder on the server and extracts every
+  // tag subfolder found there — see backend/app/services/batch_process.py.
+  batchProcess: () => request<Batch>('/batches/batch-process', { method: 'POST' }),
   getBatch: (id: number, signal?: AbortSignal) =>
     request<Batch>(`/batches/${id}`, { signal }),
   listBatches: (limit = 20) => request<Batch[]>(`/batches?limit=${limit}`),
@@ -224,6 +227,11 @@ export const api = {
       `${tag.tag_number}-${tag.description}-Template.xlsx`),
   downloadAllTemplates: () =>
     download('/tags/download-all/template', 'All-Tags-Template.xlsx'),
+  downloadSelectedTemplates: (tagNumbers: string[]) => {
+    const query = new URLSearchParams()
+    tagNumbers.forEach((tagNumber) => query.append('tag_numbers', tagNumber))
+    return download(`/tags/download-all/template?${query}`, 'Selected-Tags-Template.xlsx')
+  },
   // Same endpoints as downloadAi/downloadTemplate above, as raw bytes instead
   // of a browser download — used by src/services/localHelper.ts.
   fetchAiBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/ai`),
