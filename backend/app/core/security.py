@@ -50,3 +50,25 @@ def decode_token(token: str, expected_type: TokenType | None = None) -> dict[str
     if expected_type and claims.get("type") != expected_type:
         return None
     return claims
+
+
+def create_link_token(claims: dict[str, Any], expires_in: timedelta) -> str:
+    """A signed, self-contained capability token for a hyperlink in an exported
+    file (see app.services.download_links) — distinct from create_token's
+    access/refresh pair, which are bound to a login session, not a resource.
+    """
+    now = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        **claims,
+        "iat": int(now.timestamp()),
+        "exp": int((now + expires_in).timestamp()),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_link_token(token: str) -> dict[str, Any] | None:
+    """Return the claims, or None if the token is invalid, tampered with, or expired."""
+    try:
+        return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        return None

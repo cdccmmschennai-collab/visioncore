@@ -38,6 +38,7 @@ from app.schemas.tag import (
     UploadResponse,
 )
 from app.services.claude_extractor import ALLOWED_MEDIA_TYPES
+from app.services.download_links import verify_photo_token
 from app.services.fields import normalise_payload
 from app.services.filename_parser import (
     SUPPORTED_EXTENSIONS,
@@ -233,15 +234,25 @@ async def upload(
             content_hash = hashlib.sha256(data).hexdigest()
 
             # Same bytes already stored somewhere (any batch, any tag) — point
-            # this row at that file instead of writing a second copy.
+            # this row at that file instead of writing a second copy. But a
+            # row pulled in by app/services/sync_client.py can carry a
+            # stored_path whose file was never actually fetched down here —
+            # reusing that dangling path would silently drop the bytes we
+            # were just handed. Fall back to a real write when it doesn't
+            # resolve, so the upload is never lost.
             duplicate = await db.scalar(
                 select(TagImage.stored_path)
                 .where(TagImage.content_hash == content_hash)
                 .limit(1)
             )
+            stored_path = None
             if duplicate is not None:
-                stored_path, suffix = duplicate, Path(duplicate).suffix
-            else:
+                try:
+                    resolve_stored(duplicate)
+                    stored_path, suffix = duplicate, Path(duplicate).suffix
+                except (FileNotFoundError, ValueError):
+                    stored_path = None
+            if stored_path is None:
                 stored = save_upload(reference, tag_number, original_name, data)
                 stored_path, suffix = str(stored), stored.suffix
 
@@ -397,6 +408,27 @@ async def retry_item(
     return _item_out(item)
 
 
+async def _serve_image(image: TagImage) -> FileResponse:
+    try:
+        path = resolve_stored(image.stored_path)
+    except FileNotFoundError:
+        # Common for a tag synced in before app/services/sync_client.py
+        # downloaded photo files (or from a page pulled before that existed):
+        # the row replicated, the file on disk never did. Fetch it from
+        # production now, on demand.
+        path = await fetch_missing_photo(image.id, image.stored_path)
+        if path is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
+            ) from None
+    except ValueError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
+        ) from None
+
+    return FileResponse(path=path, filename=image.original_filename, media_type=image.media_type)
+
+
 @router.get("/{batch_id}/images/{image_id}")
 async def get_batch_image(
     batch_id: int, image_id: int, user: CurrentUser, db: DbSession
@@ -431,24 +463,34 @@ async def get_batch_image(
             status.HTTP_403_FORBIDDEN, "That photo belongs to another user's tag."
         )
 
-    try:
-        path = resolve_stored(image.stored_path)
-    except FileNotFoundError:
-        # Common for a tag synced in before app/services/sync_client.py
-        # downloaded photo files (or from a page pulled before that existed):
-        # the row replicated, the file on disk never did. Fetch it from
-        # production now, on demand.
-        path = await fetch_missing_photo(image.id, image.stored_path)
-        if path is None:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
-            ) from None
-    except ValueError:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
-        ) from None
+    return await _serve_image(image)
 
-    return FileResponse(path=path, filename=image.original_filename, media_type=image.media_type)
+
+@router.get("/images/photo-link")
+async def get_photo_by_link(token: str, db: DbSession) -> FileResponse:
+    """Unauthenticated counterpart to `get_batch_image`, for the INPUT PHOTO
+    hyperlink embedded in an exported Template workbook — see
+    app.services.download_links. Guarded by a signed, expiring, tag-scoped
+    token instead of CurrentUser, and resolves to that tag's current first
+    photo (by TagImage.id) rather than a fixed image_id, so the link keeps
+    working even if the tag's photos are re-uploaded later.
+    """
+    tag_number = verify_photo_token(token)
+    if tag_number is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "This photo link is invalid or has expired."
+        )
+    image = await db.scalar(
+        select(TagImage)
+        .join(BatchItem, BatchItem.id == TagImage.item_id)
+        .where(BatchItem.tag_number == tag_number)
+        .order_by(TagImage.id)
+        .limit(1)
+    )
+    if image is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No photo found for that tag.")
+
+    return await _serve_image(image)
 
 
 @router.get("", response_model=list[BatchOut])
