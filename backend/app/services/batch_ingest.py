@@ -1,10 +1,9 @@
 """Shared Batch/BatchItem/TagImage creation.
 
-Used by both the multipart `/batches/upload` endpoint and the local-folder
-Batch Process feature (`app/services/batch_process.py`), so a tag entering
-the system either way goes through the exact same de-duplication and storage
-logic before extraction ever begins — no separate ingestion path to keep in
-sync.
+Used by both the multipart `/batches/upload` and `/batches/batch-process`
+endpoints (`app/api/v1/batches.py`), so a tag entering the system either way
+goes through the exact same de-duplication and storage logic before
+extraction ever begins — no separate ingestion path to keep in sync.
 """
 from __future__ import annotations
 

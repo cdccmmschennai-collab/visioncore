@@ -29,9 +29,9 @@ class Batch(Base, TimestampMixin):
     )
     total_images: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tags: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # True only for a batch created by the "Batch Process" folder scan (see
-    # app/services/batch_process.py) — gates the extra AI Extraction /
-    # Consolidate file exports so a normal upload's behaviour is untouched.
+    # True only for a batch created via POST /batches/batch-process (a
+    # browser-scanned local folder — see frontend/src/utils/folderAccess.ts),
+    # never for a normal drag-drop upload.
     is_batch_process: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     user = relationship("User", back_populates="batches")

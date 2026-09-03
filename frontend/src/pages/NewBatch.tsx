@@ -7,8 +7,15 @@ import Modal from '@/components/Modal'
 import Spinner from '@/components/Spinner'
 import StatusRail from '@/components/StatusRail'
 import { api } from '@/api/client'
-import type { AssetTag, Batch, ExtractionPayload, ItemStatus, RejectedFile } from '@/api/types'
+import type { AssetTag, Batch, BatchItem, ExtractionPayload, ItemStatus, RejectedFile } from '@/api/types'
 import { LIMITS } from '@/config'
+import {
+  isFolderAccessSupported,
+  pickBatchProcessFolder,
+  scanTagFolders,
+  writeFileToFolder,
+  type FSDirectoryHandle,
+} from '@/utils/folderAccess'
 import { pushExtractedWorkbooks, pushTemplateRevision } from '@/services/localHelper'
 import { formatFileSize } from '@/utils/filename'
 import { stagedGroup, type StagedFile } from '@/utils/upload'
@@ -60,9 +67,62 @@ export default function NewBatch() {
   // reopened from History (whose id will never match).
   const [batchProcessing, setBatchProcessing] = useState(false)
   const batchProcessRunRef = useRef<number | null>(null)
+  // The local folder the current (or most recently completed) Batch Process
+  // run was picked from, and which batch id it belongs to — kept around
+  // across a retry (not cleared once the batch first reaches a terminal
+  // state) so a re-extracted tag's AI Extraction copy and the consolidated
+  // workbook keep getting written back into it. See folderAccess.ts.
+  const batchProcessDirRef = useRef<{ dir: FSDirectoryHandle; batchId: number } | null>(null)
+  const writeBackWarnedRef = useRef(false)
   const [batchProcessSummary, setBatchProcessSummary] = useState<
     { total: number; completed: number; failed: number } | null
   >(null)
+
+  const warnWriteBackFailure = useCallback((context: string, err: unknown) => {
+    // Logged unconditionally (even after the first toast) so a real repro
+    // gives us the actual cause instead of another silent no-op.
+    console.error(`[Batch Process] local folder write failed — ${context}`, err)
+    if (writeBackWarnedRef.current) return
+    writeBackWarnedRef.current = true
+    toast.warn(
+      "Could not write results into the AI Extraction / Consolidate file folders — the Download buttons still work normally.",
+    )
+  }, [toast])
+
+  /** Copies one just-completed tag's AI Output workbook into
+   * `<picked folder>/AI Extraction/`, mirroring what the server used to do
+   * for a local-only deployment. Best-effort — never blocks or fails the
+   * extraction itself. */
+  const writeAiExtractionCopy = useCallback(
+    async (dir: FSDirectoryHandle, item: BatchItem) => {
+      if (!item.asset_tag) return
+      try {
+        const blob = await api.fetchAiBlob(item.asset_tag)
+        await writeFileToFolder(
+          dir, 'AI Extraction', `AI Extraction_${item.tag_number}-${item.description}.xlsx`, blob,
+        )
+      } catch (err) {
+        warnWriteBackFailure(`AI Extraction copy for ${item.tag_number}`, err)
+      }
+    },
+    [warnWriteBackFailure],
+  )
+
+  /** (Re)writes the one consolidated workbook for this Batch Process run
+   * into `<picked folder>/Consolidate file/`, overwriting the same file each
+   * time — same "one file per batch, always current" behaviour the server
+   * used to give. */
+  const writeConsolidatedCopy = useCallback(
+    async (dir: FSDirectoryHandle, reference: string, tagNumbers: string[]) => {
+      try {
+        const blob = await api.fetchConsolidatedBlob(tagNumbers)
+        await writeFileToFolder(dir, 'Consolidate file', `Consolidated_${reference}.xlsx`, blob)
+      } catch (err) {
+        warnWriteBackFailure(`consolidated workbook for ${reference}`, err)
+      }
+    },
+    [warnWriteBackFailure],
+  )
 
   const toggleDetails = (itemId: number) => {
     setExpandedItems((prev) => {
@@ -90,13 +150,19 @@ export default function NewBatch() {
         try {
           const fresh = await api.getBatch(batchId)
           setBatch(fresh)
-          // Auto-save AI Output + Template Output to the local helper the
-          // moment a tag's extraction completes — once per item, ever.
+          const dirState = batchProcessDirRef.current
+          const dirForThisBatch = dirState && dirState.batchId === fresh.id ? dirState.dir : null
+          // Auto-save AI Output + Template Output to the local helper, and —
+          // for a Batch Process run — the AI Extraction copy into the picked
+          // folder, the moment a tag's extraction completes (or resolves as
+          // an already-extracted duplicate). Once per item, ever.
           fresh.items.forEach((item) => {
-            if (item.status === 'completed' && item.asset_tag && !autoSavedRef.current.has(item.id)) {
-              autoSavedRef.current.add(item.id)
-              void pushExtractedWorkbooks(item.asset_tag)
-            }
+            const justResolved = (item.status === 'completed' || item.status === 'duplicate')
+              && item.asset_tag && !autoSavedRef.current.has(item.id)
+            if (!justResolved) return
+            autoSavedRef.current.add(item.id)
+            if (item.status === 'completed') void pushExtractedWorkbooks(item.asset_tag!)
+            if (dirForThisBatch) void writeAiExtractionCopy(dirForThisBatch, item)
           })
           // A retried item is done once it leaves the active pipeline states.
           setRetryingIds((prev) => {
@@ -112,6 +178,15 @@ export default function NewBatch() {
           if (TERMINAL.has(fresh.status)) {
             stopPolling()
             const failures = fresh.items.filter((item) => item.status === 'failed').length
+            // Refresh the one consolidated workbook for this run every time it
+            // reaches a terminal state — including after a retry — same as
+            // the AI Extraction copies above.
+            if (dirForThisBatch) {
+              const tagNumbers = fresh.items
+                .filter((item) => (item.status === 'completed' || item.status === 'duplicate') && item.asset_tag)
+                .map((item) => item.tag_number)
+              if (tagNumbers.length > 0) void writeConsolidatedCopy(dirForThisBatch, fresh.reference, tagNumbers)
+            }
             // A Batch Process run gets the "File Extraction Completed" summary
             // popup instead of a toast — everything else (normal upload,
             // reopening a batch from History) keeps the existing toast.
@@ -131,7 +206,7 @@ export default function NewBatch() {
         }
       }, POLL_MS)
     },
-    [stopPolling, toast],
+    [stopPolling, toast, writeAiExtractionCopy, writeConsolidatedCopy],
   )
 
   /** Re-run extraction for one failed tag only — the rest of the batch is untouched. */
@@ -162,10 +237,12 @@ export default function NewBatch() {
       .then((fetched) => {
         if (cancelled) return
         setBatch(fetched)
-        // Already-completed items belong to a past session — mark them seen
+        // Already-resolved items belong to a past session — mark them seen
         // so re-opening this batch from History doesn't re-trigger a push.
         fetched.items.forEach((item) => {
-          if (item.status === 'completed' && item.asset_tag) autoSavedRef.current.add(item.id)
+          if ((item.status === 'completed' || item.status === 'duplicate') && item.asset_tag) {
+            autoSavedRef.current.add(item.id)
+          }
         })
         if (!TERMINAL.has(fetched.status)) startPolling(fetched.id)
       })
@@ -237,25 +314,50 @@ export default function NewBatch() {
     }
   }
 
-  /** Scan the server's Batch Process folder and extract every tag subfolder
-   * found there — same pipeline as a normal upload, just server-triggered.
-   * Stays on this page (no navigation) so the whole run — per-tag status,
-   * overall progress, and the completion popup — is watched right here,
-   * the same way a normal upload's progress already is. */
+  /** Let the user pick a local folder, scan it right here in the browser for
+   * tag subfolders/files, and extract every tag found through the same
+   * pipeline a normal upload uses. Reading (and, once extraction lands,
+   * writing the AI Extraction / Consolidate file outputs back) happens
+   * entirely client-side via the File System Access API — see
+   * utils/folderAccess.ts — so this works the same whether the backend is
+   * running locally or on a remote deployment. Stays on this page (no
+   * navigation) so the whole run is watched right here, same as a normal
+   * upload's progress already is. */
   const runBatchProcess = async () => {
+    if (!isFolderAccessSupported()) {
+      toast.error('Batch Process needs a Chromium browser (Chrome or Edge) to open a local folder.')
+      return
+    }
+
     setBatchProcessing(true)
     setBatchProcessSummary(null)
     try {
-      const started = await api.batchProcess()
-      batchProcessRunRef.current = started.id
-      setBatch(started)
-      setRejected([])
+      const dir = await pickBatchProcessFolder()
+      const staged = await scanTagFolders(dir)
+      if (staged.length === 0) {
+        toast.error('No tag folders with images were found in that folder.')
+        return
+      }
+
+      writeBackWarnedRef.current = false
+      const response = await api.batchProcess(staged)
+      batchProcessRunRef.current = response.batch.id
+      batchProcessDirRef.current = { dir, batchId: response.batch.id }
+      setBatch(response.batch)
+      setRejected(response.rejected)
       setFiles([])
+
+      if (response.rejected.length > 0) {
+        toast.warn(`${response.rejected.length} file(s) couldn't be read and were skipped.`)
+      }
       toast.success(
-        `Batch Process started — extracting ${started.total_tags} tag${started.total_tags === 1 ? '' : 's'}…`,
+        `Batch Process started — extracting ${response.batch.total_tags} tag${response.batch.total_tags === 1 ? '' : 's'}…`,
       )
-      startPolling(started.id)
+      startPolling(response.batch.id)
     } catch (caught) {
+      // The user closing the folder picker without choosing anything is not
+      // an error worth surfacing.
+      if (caught instanceof DOMException && caught.name === 'AbortError') return
       toast.error(caught instanceof Error ? caught.message : 'Could not start Batch Process.')
     } finally {
       setBatchProcessing(false)
@@ -298,6 +400,7 @@ export default function NewBatch() {
     setRejected([])
     setFiles([])
     batchProcessRunRef.current = null
+    batchProcessDirRef.current = null
     setBatchProcessSummary(null)
     navigate('/batch', { replace: true, state: { fresh: true } })
   }
@@ -335,7 +438,7 @@ export default function NewBatch() {
             className="btn btn-primary"
             onClick={runBatchProcess}
             disabled={batchProcessing}
-            title="Extract every tag folder under the server's Batch Process source folder"
+            title="Pick a local folder and extract every tag folder inside it"
           >
             {batchProcessing ? <Spinner size={14} /> : null}
             {batchProcessing ? 'Scanning…' : 'Batch Process'}
