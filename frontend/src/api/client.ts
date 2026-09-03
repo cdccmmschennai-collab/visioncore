@@ -192,9 +192,16 @@ export const api = {
     })
     return request<UploadResponse>('/batches/upload', { method: 'POST', formData: form })
   },
-  // Scans the Batch Process source folder on the server and extracts every
-  // tag subfolder found there — see backend/app/services/batch_process.py.
-  batchProcess: () => request<Batch>('/batches/batch-process', { method: 'POST' }),
+  // Extracts every tag the browser found scanning a local folder — see
+  // frontend/src/utils/folderAccess.ts. Same multipart shape as `upload`.
+  batchProcess: (staged: StagedFile[]) => {
+    const form = new FormData()
+    staged.forEach(({ file, folder }) => {
+      form.append('files', file, file.name)
+      form.append('folders', folder ?? '')
+    })
+    return request<UploadResponse>('/batches/batch-process', { method: 'POST', formData: form })
+  },
   getBatch: (id: number, signal?: AbortSignal) =>
     request<Batch>(`/batches/${id}`, { signal }),
   listBatches: (limit = 20) => request<Batch[]>(`/batches?limit=${limit}`),
@@ -236,6 +243,15 @@ export const api = {
   // of a browser download — used by src/services/localHelper.ts.
   fetchAiBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/ai`),
   fetchTemplateBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/template`),
+  // Same consolidated-workbook endpoint as downloadSelectedTemplates below,
+  // as raw bytes instead of a browser download — used to write the Batch
+  // Process "Consolidate file" output straight into the picked local folder
+  // (see frontend/src/utils/folderAccess.ts).
+  fetchConsolidatedBlob: (tagNumbers: string[]) => {
+    const query = new URLSearchParams()
+    tagNumbers.forEach((tagNumber) => query.append('tag_numbers', tagNumber))
+    return fetchBlob(`/tags/download-all/template?${query}`)
+  },
   searchTags: (params: { field: string; value: string; page?: number; pageSize?: number }) => {
     const query = new URLSearchParams({
       field: params.field,

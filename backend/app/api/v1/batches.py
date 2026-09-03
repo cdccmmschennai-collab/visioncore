@@ -36,7 +36,6 @@ from app.schemas.tag import (
     UploadResponse,
 )
 from app.services.batch_ingest import create_batch_with_items
-from app.services.batch_process import BatchProcessError, reextract_batch_process_item, run_batch_process, scan_tag_folders
 from app.services.claude_extractor import ALLOWED_MEDIA_TYPES
 from app.services.download_links import verify_photo_token
 from app.services.fields import normalise_payload
@@ -107,18 +106,14 @@ async def _load_batch(db, batch_id: int, user) -> Batch:
     return batch
 
 
-@router.post("/upload", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
-async def upload(
-    user: CurrentUser,
-    db: DbSession,
-    background: BackgroundTasks,
-    files: list[UploadFile] = File(...),
-    folders: list[str] | None = Form(None),
-) -> UploadResponse:
-    """Accept up to 20 images, group them by tag, and start extraction.
+async def _group_uploads(
+    files: list[UploadFile], folders: list[str] | None
+) -> tuple[OrderedDict[str, dict], list[RejectedFile]]:
+    """Read and group an uploaded file list by tag, exactly the way a Batch
+    Process browser folder scan or a Dropzone folder upload lays them out.
 
     Files that cannot be parsed are rejected individually and reported back —
-    one bad filename should not cost the user the other nineteen uploads.
+    one bad filename should not cost the caller the rest of the batch.
 
     `folders` is an optional, positionally-parallel list to `files`: when a
     user uploads a folder tree instead of loose images, the frontend sends
@@ -128,15 +123,6 @@ async def upload(
     entire subfolder of 1-5 photos becomes one tag regardless of how its
     individual files are named.
     """
-    if not files:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add at least one image.")
-    if len(files) > settings.max_images_per_batch:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"A batch takes up to {settings.max_images_per_batch} images. "
-            f"You selected {len(files)}.",
-        )
-
     rejected: list[RejectedFile] = []
     grouped: OrderedDict[str, dict] = OrderedDict()
     max_bytes = settings.max_image_size_mb * 1024 * 1024
@@ -186,6 +172,29 @@ async def upload(
             continue
         group["files"].append((upload_file.filename, data))
 
+    return grouped, rejected
+
+
+@router.post("/upload", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
+async def upload(
+    user: CurrentUser,
+    db: DbSession,
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    folders: list[str] | None = Form(None),
+) -> UploadResponse:
+    """Accept up to 20 images, group them by tag, and start extraction."""
+    if not files:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add at least one image.")
+    if len(files) > settings.max_images_per_batch:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"A batch takes up to {settings.max_images_per_batch} images. "
+            f"You selected {len(files)}.",
+        )
+
+    grouped, rejected = await _group_uploads(files, folders)
+
     if len(grouped) > settings.max_tags_per_batch:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -211,37 +220,53 @@ async def upload(
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
 
 
-@router.post("/batch-process", response_model=BatchOut, status_code=status.HTTP_201_CREATED)
+@router.post("/batch-process", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def batch_process(
-    user: CurrentUser, db: DbSession, background: BackgroundTasks
-) -> BatchOut:
-    """Scan the Batch Process source folder and extract every tag subfolder
-    found there through the same pipeline `upload()` uses above.
+    user: CurrentUser,
+    db: DbSession,
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    folders: list[str] | None = Form(None),
+) -> UploadResponse:
+    """Extract every tag the browser found when it scanned the user's local
+    Batch Process folder (see frontend/src/utils/folderAccess.ts).
 
-    See app/services/batch_process.py for the folder layout, the per-tag
-    "AI Extraction" export and the consolidated workbook this also produces.
+    Same multipart shape and grouping as `upload()` above — the only
+    differences are the much higher tag ceiling (a Batch Process run covers
+    many more tags than a normal drag-drop batch) and `is_batch_process=True`
+    on the created Batch, which the frontend uses to write the AI Extraction
+    and Consolidate file outputs back into the picked folder as each tag
+    completes, in place of what a server-local export used to do here.
     """
-    try:
-        found = scan_tag_folders()
-    except BatchProcessError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
-    if not found:
+    if not files:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No tag folders with images were found to process.")
+
+    grouped, rejected = await _group_uploads(files, folders)
+
+    if len(grouped) > settings.max_tags_per_batch_process:
         raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_400_BAD_REQUEST,
+            f"A Batch Process run covers up to {settings.max_tags_per_batch_process} tags. "
+            f"Your selection has {len(grouped)}.",
+        )
+    if not grouped:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
             "No tag folders with images were found to process.",
         )
 
     reference = f"BP-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
-    grouped: OrderedDict[str, dict] = OrderedDict()
-    for tag_number, description, files in found:
-        grouped[tag_number] = {"description": description, "files": files}
-
-    batch, _duplicates = await create_batch_with_items(
+    batch, duplicate_tags = await create_batch_with_items(
         db, reference, grouped, user, is_batch_process=True
     )
-    background.add_task(run_batch_process, batch.id, user.id)
+    duplicates = [_asset_tag_out(t) for t in duplicate_tags]
 
-    return _batch_out(await _load_batch(db, batch.id, user))
+    duplicate_numbers = {t.tag_number for t in duplicate_tags}
+    if any(tag_number not in duplicate_numbers for tag_number in grouped):
+        background.add_task(process_batch, batch.id, user.id)
+
+    batch = await _load_batch(db, batch.id, user)
+    return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
 
 
 @router.get("/by-status", response_model=Page[BatchOut])
@@ -295,14 +320,17 @@ async def list_extracted_images(
 ) -> Page[ExtractedImageOut]:
     """Backs the Home page's Total Images Extracted drill-down.
 
-    Every uploaded image, newest first, with its parent tag's current status —
-    an image doesn't carry its own status, only the tag (BatchItem) it belongs
-    to does.
+    Every completed tag's images, newest first. Scoped to
+    `ItemStatus.COMPLETED` only — a duplicate tag's images were uploaded but
+    never actually extracted (see create_batch_with_items), and an
+    uploaded/extracting/processing/failed item has no finished extraction
+    either, so none of those belong in an "extracted" count.
     """
     query = (
         select(TagImage, BatchItem.tag_number, BatchItem.status, Batch.reference)
         .join(BatchItem, BatchItem.id == TagImage.item_id)
         .join(Batch, Batch.id == BatchItem.batch_id)
+        .where(BatchItem.status == ItemStatus.COMPLETED)
         .order_by(TagImage.created_at.desc())
     )
     count_query = (
@@ -310,6 +338,7 @@ async def list_extracted_images(
         .select_from(TagImage)
         .join(BatchItem, BatchItem.id == TagImage.item_id)
         .join(Batch, Batch.id == BatchItem.batch_id)
+        .where(BatchItem.status == ItemStatus.COMPLETED)
     )
     if user.role != UserRole.ADMIN:
         query = query.where(Batch.user_id == user.id)
@@ -345,9 +374,11 @@ async def retry_item(
 ) -> BatchItemOut:
     """Re-extract one failed tag in place — no new batch, tag, or image rows.
 
-    Same "Re-Extract" button either way, but a Batch Process batch also needs
-    its AI Extraction copy and consolidated workbook refreshed once the retry
-    lands — see app/services/batch_process.py.
+    Same "Re-Extract" button either way, including a Batch Process batch: the
+    frontend picks up this item's next "completed" status from the same
+    polling loop it already uses, and re-writes that tag's AI Extraction file
+    (and the batch's consolidated workbook) into the picked folder from
+    there — see frontend/src/pages/NewBatch.tsx.
     """
     batch = await _load_batch(db, batch_id, user)
     item = next((i for i in batch.items if i.id == item_id), None)
@@ -360,10 +391,7 @@ async def retry_item(
     batch.status = BatchStatus.PROCESSING
     await db.commit()
 
-    if batch.is_batch_process:
-        background.add_task(reextract_batch_process_item, item.id, batch.id, user.id)
-    else:
-        background.add_task(reextract_item, item.id, batch.id, user.id)
+    background.add_task(reextract_item, item.id, batch.id, user.id)
     return _item_out(item)
 
 

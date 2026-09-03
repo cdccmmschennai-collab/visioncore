@@ -15,6 +15,9 @@ export const LIMITS = {
   maxTagsPerBatch: 10,
   maxImagesPerTag: 5,
   maxImageSizeMb: 15,
+  // Batch Process (browser-scanned local folder) covers far more tags than
+  // a normal drag-drop batch — see backend MAX_TAGS_PER_BATCH_PROCESS.
+  maxTagsPerBatchProcess: 50,
 }
 
 export const ACCEPTED_EXTENSIONS = ['.jpg', '.jpeg', '.jfif', '.png', '.webp', '.gif', '.bmp']

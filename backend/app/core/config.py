@@ -65,15 +65,13 @@ class Settings(BaseSettings):
     max_images_per_tag: int = Field(5, alias="MAX_IMAGES_PER_TAG")
     max_image_size_mb: int = Field(15, alias="MAX_IMAGE_SIZE_MB")
 
-    # ── Batch Process (local folder scan) ───────────────────────────────────
-    # Root folder scanned by the "Batch Process" button on the New Batch page.
-    # Each immediate subfolder is treated as one tag (same "<TAG>-<DESCRIPTION>"
-    # convention as a normal folder upload). "AI Extraction" and
-    # "Consolidate file" subfolders beneath it are where results are written —
-    # see app/services/batch_process.py.
-    batch_process_source_dir: str = Field(
-        r"C:\Asset photo-Tag extraction", alias="BATCH_PROCESS_SOURCE_DIR"
-    )
+    # ── Batch Process (browser-driven folder scan) ──────────────────────────
+    # The "Batch Process" button on the New Batch page reads/writes a local
+    # folder directly from the browser (File System Access API) rather than
+    # from a server-local path, so it works the same whether the backend is
+    # local or a remote deployment. It covers far more tags per run than a
+    # normal drag-drop upload, hence the separate, higher ceiling.
+    max_tags_per_batch_process: int = Field(50, alias="MAX_TAGS_PER_BATCH_PROCESS")
 
     # ── Template path columns ────────────────────────────────────────────────
     # The reference workbook records the network location of each photo and
