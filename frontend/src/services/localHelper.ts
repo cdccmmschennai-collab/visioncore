@@ -39,6 +39,8 @@ async function post(
   tagFolder: string,
   blob: Blob,
 ): Promise<void> {
+  const source = `${kind} workbook for ${tagFolder}`
+  const destination = `C:\\Asset photo data capturing tool\\${tagFolder}\\ (kind=${kind})`
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), HELPER_TIMEOUT_MS)
   try {
@@ -49,8 +51,20 @@ async function post(
       body: blob,
       signal: controller.signal,
     })
-    if (!response.ok) throw new Error(`Local helper responded ${response.status}`)
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(`Local helper responded ${response.status}${body ? `: ${body}` : ''}`)
+    }
   } catch (err) {
+    // Always logged (unlike the one-time warning below) so a save that
+    // starts failing after the helper was previously reachable — a
+    // permission error, a locked file, the helper crashing — never goes by
+    // completely unnoticed the way a single suppressed warning would.
+    console.error('[VisionCore Local Helper] File save failed', {
+      source,
+      destination,
+      error: err instanceof Error ? err.message : err,
+    })
     warnOnce(
       'Not reachable at 127.0.0.1:5577 — workbooks were not auto-saved to this PC. '
       + 'Manual download still works normally. See local-helper/README.md.',
