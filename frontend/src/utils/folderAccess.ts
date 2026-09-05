@@ -122,3 +122,24 @@ export async function writeFileToFolder(
   await writable.write(blob)
   await writable.close()
 }
+
+const _REVISION_NAME = /Revision (\d+)\.xlsx$/i
+
+/** Next "<prefix> Revision N.xlsx" name not already present in
+ * `<dir>/<subfolder>` — mirrors the Local Helper's own
+ * `next_revision_path()` (local-helper/visioncore_local_helper.py) so a
+ * revision here is never reused/overwritten either. */
+export async function nextRevisionFilename(
+  dir: FSDirectoryHandle,
+  subfolder: string,
+  prefix: string,
+): Promise<string> {
+  const subDir = await dir.getDirectoryHandle(subfolder, { create: true })
+  let highest = 0
+  for await (const entry of subDir.values()) {
+    if (entry.kind !== 'file' || !entry.name.startsWith(prefix)) continue
+    const match = entry.name.match(_REVISION_NAME)
+    if (match) highest = Math.max(highest, Number(match[1]))
+  }
+  return `${prefix} Revision ${highest + 1}.xlsx`
+}
