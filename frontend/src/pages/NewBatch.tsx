@@ -78,6 +78,15 @@ export default function NewBatch() {
     { total: number; completed: number; failed: number } | null
   >(null)
 
+  // Auto-save folder for the plain "Upload and extract" / drag-and-drop
+  // workflow — entirely separate from batchProcessDirRef above, so it never
+  // applies to (and is never touched by) a Batch Process run. Picked once via
+  // the button in the dropzone section below and then reused for every batch
+  // this page creates for the rest of the session — see writeDragDropAutoSave.
+  const dragDropDirRef = useRef<FSDirectoryHandle | null>(null)
+  const [dragDropDirName, setDragDropDirName] = useState<string | null>(null)
+  const dragDropSaveWarnedRef = useRef(false)
+
   const warnWriteBackFailure = useCallback((context: string, err: unknown) => {
     // Logged unconditionally (even after the first toast) so a real repro
     // gives us the actual cause instead of another silent no-op.
@@ -124,6 +133,47 @@ export default function NewBatch() {
     [warnWriteBackFailure],
   )
 
+  /** Saves one just-completed drag-and-drop tag's AI Output + Template Output
+   * into `<picked folder>/<TAG NUMBER>-<DESCRIPTION>/`, creating both the
+   * folder and the subfolder as needed (see writeFileToFolder in
+   * utils/folderAccess.ts). Entirely separate from the Batch Process
+   * write-back above — different ref, different folder layout (one subfolder
+   * per tag here vs. shared "AI Extraction"/"Consolidate file" folders
+   * there) — and from the optional Local Helper push (pushExtractedWorkbooks),
+   * which keeps running in parallel regardless of whether this folder is set. */
+  const writeDragDropAutoSave = useCallback(
+    async (dir: FSDirectoryHandle, item: BatchItem) => {
+      if (!item.asset_tag) return
+      const subfolder = `${item.tag_number}-${item.description}`
+      try {
+        const [aiBlob, templateBlob] = await Promise.all([
+          api.fetchAiBlob(item.asset_tag),
+          api.fetchTemplateBlob(item.asset_tag),
+        ])
+        await Promise.all([
+          writeFileToFolder(dir, subfolder, 'AI Output.xlsx', aiBlob),
+          writeFileToFolder(dir, subfolder, 'Template Output.xlsx', templateBlob),
+        ])
+      } catch (err) {
+        // Always logged (not just the one-time toast below) so a failure
+        // that starts happening later in the session — permission revoked,
+        // the folder moved/deleted, disk full — leaves a real trail.
+        console.error('[New Batch auto-save] File save failed', {
+          source: `${item.tag_number} workbooks`,
+          destination: `${dragDropDirName ?? 'chosen folder'}\\${subfolder}\\`,
+          error: err instanceof Error ? err.message : err,
+        })
+        if (!dragDropSaveWarnedRef.current) {
+          dragDropSaveWarnedRef.current = true
+          toast.warn(
+            `Could not auto-save ${item.tag_number} to the chosen folder — the Download buttons still work normally.`,
+          )
+        }
+      }
+    },
+    [dragDropDirName, toast],
+  )
+
   const toggleDetails = (itemId: number) => {
     setExpandedItems((prev) => {
       const next = new Set(prev)
@@ -163,6 +213,13 @@ export default function NewBatch() {
             autoSavedRef.current.add(item.id)
             if (item.status === 'completed') void pushExtractedWorkbooks(item.asset_tag!)
             if (dirForThisBatch) void writeAiExtractionCopy(dirForThisBatch, item)
+            // Drag-and-drop's own auto-save folder — only for a batch that
+            // isn't the active Batch Process run (dirForThisBatch is only
+            // ever set for that one), so the two never write into each other's
+            // folders even if both have been picked in the same session.
+            if (!dirForThisBatch && item.status === 'completed' && dragDropDirRef.current) {
+              void writeDragDropAutoSave(dragDropDirRef.current, item)
+            }
           })
           // A retried item is done once it leaves the active pipeline states.
           setRetryingIds((prev) => {
@@ -206,7 +263,7 @@ export default function NewBatch() {
         }
       }, POLL_MS)
     },
-    [stopPolling, toast, writeAiExtractionCopy, writeConsolidatedCopy],
+    [stopPolling, toast, writeAiExtractionCopy, writeConsolidatedCopy, writeDragDropAutoSave],
   )
 
   /** Re-run extraction for one failed tag only — the rest of the batch is untouched. */
@@ -311,6 +368,29 @@ export default function NewBatch() {
       toast.error(caught instanceof Error ? caught.message : 'Upload failed.')
     } finally {
       setUploading(false)
+    }
+  }
+
+  /** One-time folder pick for the drag-and-drop auto-save above — a browser
+   * can't silently write to an arbitrary path like C:\Asset photo data
+   * capturing tool without this explicit, user-driven grant (the same
+   * constraint Batch Process's own folder pick already works within). Once
+   * granted, every tag this page extracts from here on writes there
+   * automatically with no further prompts, for the rest of the session. */
+  const chooseDragDropFolder = async () => {
+    if (!isFolderAccessSupported()) {
+      toast.error('Auto-save needs a Chromium browser (Chrome or Edge) to open a local folder.')
+      return
+    }
+    try {
+      const dir = await pickBatchProcessFolder()
+      dragDropDirRef.current = dir
+      dragDropSaveWarnedRef.current = false
+      setDragDropDirName(dir.name)
+      toast.success(`Auto-saving extracted workbooks into "${dir.name}".`)
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') return
+      toast.error(caught instanceof Error ? caught.message : 'Could not set the auto-save folder.')
     }
   }
 
@@ -456,8 +536,10 @@ export default function NewBatch() {
       {!batch && !viewingExisting && !loadingBatch && (
         <section className="card stack gap-16">
           <Dropzone ref={dropzoneRef} files={files} onChange={setFiles} disabled={uploading} />
-          <div className="row gap-12 wrap">
-
+          <div className="row gap-12 wrap" style={{ alignItems: 'center' }}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={chooseDragDropFolder}>
+              {dragDropDirName ? `Auto-save folder: ${dragDropDirName} (change)` : 'Choose Auto-Save Folder'}
+            </button>
             <span className="spacer" />
             <button
               type="button"
