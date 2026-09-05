@@ -11,6 +11,7 @@ import type { AssetTag, Batch, BatchItem, ExtractionPayload, ItemStatus, Rejecte
 import { LIMITS } from '@/config'
 import {
   isFolderAccessSupported,
+  nextRevisionFilename,
   pickBatchProcessFolder,
   scanTagFolders,
   writeFileToFolder,
@@ -172,6 +173,60 @@ export default function NewBatch() {
       }
     },
     [dragDropDirName, toast],
+  )
+
+  /** Adds a new "Template Output Revision N.xlsx" into the drag-and-drop
+   * auto-save folder whenever an already-extracted tag is edited and saved —
+   * mirrors the Local Helper's own revisioning (pushTemplateRevision /
+   * next_revision_path) but inside the picked folder instead. The base
+   * "Template Output.xlsx" written by writeDragDropAutoSave above is never
+   * touched again. */
+  const writeDragDropTemplateRevision = useCallback(
+    async (dir: FSDirectoryHandle, tag: AssetTag) => {
+      const subfolder = `${tag.tag_number}-${tag.description}`
+      try {
+        const blob = await api.fetchTemplateBlob(tag)
+        const filename = await nextRevisionFilename(dir, subfolder, 'Template Output')
+        await writeFileToFolder(dir, subfolder, filename, blob)
+      } catch (err) {
+        console.error('[New Batch auto-save] Revision save failed', {
+          source: `${tag.tag_number} template revision`,
+          destination: `${dragDropDirName ?? 'chosen folder'}\\${subfolder}\\`,
+          error: err instanceof Error ? err.message : err,
+        })
+        if (!dragDropSaveWarnedRef.current) {
+          dragDropSaveWarnedRef.current = true
+          toast.warn(
+            `Could not save a revision for ${tag.tag_number} to the chosen folder — the Download buttons still work normally.`,
+          )
+        }
+      }
+    },
+    [dragDropDirName, toast],
+  )
+
+  /** Adds a new "Consolidated_<reference> Revision N.xlsx" into the Batch
+   * Process folder whenever an already-extracted tag from that run is
+   * edited and saved later. Deliberately does NOT touch the per-tag
+   * "AI Extraction" copy (writeAiExtractionCopy) or the original
+   * "Consolidated_<reference>.xlsx" from extraction time
+   * (writeConsolidatedCopy, unchanged, above) — per the requirement, only
+   * the consolidated file gets revisioned for a Batch Process run. */
+  const writeConsolidatedRevision = useCallback(
+    async (dir: FSDirectoryHandle, currentBatch: Batch) => {
+      const tagNumbers = currentBatch.items
+        .filter((item) => (item.status === 'completed' || item.status === 'duplicate') && item.asset_tag)
+        .map((item) => item.tag_number)
+      if (tagNumbers.length === 0) return
+      try {
+        const blob = await api.fetchConsolidatedBlob(tagNumbers)
+        const filename = await nextRevisionFilename(dir, 'Consolidate file', `Consolidated_${currentBatch.reference}`)
+        await writeFileToFolder(dir, 'Consolidate file', filename, blob)
+      } catch (err) {
+        warnWriteBackFailure(`consolidated revision for ${currentBatch.reference}`, err)
+      }
+    },
+    [warnWriteBackFailure],
   )
 
   const toggleDetails = (itemId: number) => {
@@ -459,6 +514,17 @@ export default function NewBatch() {
       await refreshBatch()
       toast.success(`Saved ${tag.tag_number}. Both workbooks have been rebuilt.`)
       void pushTemplateRevision(updated)
+      // Which picked folder (if any) this tag belongs to determines what
+      // gets revisioned — a Batch Process batch only ever revisions its one
+      // consolidated file; a drag-and-drop batch revisions this tag's own
+      // Template Output. Neither applies if no folder was ever picked for
+      // this session (pushTemplateRevision above is unaffected either way).
+      const dirState = batchProcessDirRef.current
+      if (batch && dirState && dirState.batchId === batch.id) {
+        void writeConsolidatedRevision(dirState.dir, batch)
+      } else if (dragDropDirRef.current) {
+        void writeDragDropTemplateRevision(dragDropDirRef.current, updated)
+      }
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : 'Could not save the tag.')
       throw caught
