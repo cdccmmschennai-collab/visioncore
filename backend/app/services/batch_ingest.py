@@ -7,14 +7,13 @@ extraction ever begins — no separate ingestion path to keep in sync.
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import OrderedDict
 
 from sqlalchemy import select
 
 from app.models import Activity, ActivityAction, AssetTag, Batch, BatchItem, BatchStatus, ItemStatus, TagImage
-from app.services.storage import resolve_stored, save_upload
+from app.services.storage import resolve_stored, stream_upload
 
 _MEDIA_BY_EXT = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg",
@@ -32,7 +31,7 @@ async def create_batch_with_items(
 ) -> tuple[Batch, list[AssetTag]]:
     """Create one Batch plus one BatchItem (and its TagImages) per entry.
 
-    `grouped` maps tag_number -> {"description": str, "files": [(filename, bytes), ...]}.
+    `grouped` maps tag_number -> {"description": str, "files": [(filename, UploadFile), ...]}.
     Returns the created Batch and the AssetTag rows found to already exist
     (marked DUPLICATE on the batch rather than re-extracted) — same semantics
     the `/batches/upload` endpoint has always had.
@@ -64,28 +63,33 @@ async def create_batch_with_items(
         db.add(item)
         await db.flush()
 
-        for original_name, data in group["files"]:
-            content_hash = hashlib.sha256(data).hexdigest()
+        for original_name, upload_file in group["files"]:
+            # Streamed straight to disk in chunks (never the whole file in
+            # memory at once — see storage.stream_upload) under its own
+            # collision-proof UUID path, hashing as it goes.
+            stored, content_hash, size_bytes = await stream_upload(
+                reference, tag_number, original_name, upload_file
+            )
+            await upload_file.close()
+            stored_path, suffix = str(stored), stored.suffix
 
             # Same bytes already stored somewhere (any batch, any tag) — point
-            # this row at that file instead of writing a second copy. A row
-            # pulled in by app/services/sync_client.py can carry a stored_path
-            # whose file was never actually fetched down here — reusing that
-            # dangling path would silently drop the bytes we were just handed,
-            # so fall back to a real write when it doesn't resolve.
+            # this row at that file instead of keeping a second copy, and
+            # drop the copy we just streamed. A row pulled in by
+            # app/services/sync_client.py can carry a stored_path whose file
+            # was never actually fetched down here — reusing that dangling
+            # path would silently drop the bytes we were just handed, so
+            # fall back to the copy we just wrote when it doesn't resolve.
             duplicate = await db.scalar(
                 select(TagImage.stored_path).where(TagImage.content_hash == content_hash).limit(1)
             )
-            stored_path = None
             if duplicate is not None:
                 try:
                     resolve_stored(duplicate)
+                    stored.unlink(missing_ok=True)
                     stored_path, suffix = duplicate, Path(duplicate).suffix
                 except (FileNotFoundError, ValueError):
-                    stored_path = None
-            if stored_path is None:
-                stored = save_upload(reference, tag_number, original_name, data)
-                stored_path, suffix = str(stored), stored.suffix
+                    pass
 
             db.add(TagImage(
                 item_id=item.id,
@@ -93,7 +97,7 @@ async def create_batch_with_items(
                 stored_path=stored_path,
                 content_hash=content_hash,
                 media_type=_MEDIA_BY_EXT.get(suffix.lower(), "image/jpeg"),
-                size_bytes=len(data),
+                size_bytes=size_bytes,
             ))
 
         if existing:

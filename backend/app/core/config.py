@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     # from a server-local path, so it works the same whether the backend is
     # local or a remote deployment. It covers far more tags per run than a
     # normal drag-drop upload, hence the separate, higher ceiling.
-    max_tags_per_batch_process: int = Field(50, alias="MAX_TAGS_PER_BATCH_PROCESS")
+    max_tags_per_batch_process: int = Field(100, alias="MAX_TAGS_PER_BATCH_PROCESS")
 
     # ── Template path columns ────────────────────────────────────────────────
     # The reference workbook records the network location of each photo and

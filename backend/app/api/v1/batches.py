@@ -148,11 +148,15 @@ async def _group_uploads(
                                          reason=parsed.reason))
             continue
 
-        data = await upload_file.read()
-        if not data:
+        # Starlette already knows each file's total size from parsing the
+        # multipart body (accurate before any of it is read here) — no need
+        # to read the file just to check it, which is what let a large Batch
+        # Process run's files all end up buffered in memory at once.
+        size = upload_file.size or 0
+        if not size:
             rejected.append(RejectedFile(filename=upload_file.filename, reason="File is empty"))
             continue
-        if len(data) > max_bytes:
+        if size > max_bytes:
             rejected.append(RejectedFile(
                 filename=upload_file.filename,
                 reason=f"Larger than the {settings.max_image_size_mb} MB limit",
@@ -170,7 +174,7 @@ async def _group_uploads(
                        f"{settings.max_images_per_tag} images",
             ))
             continue
-        group["files"].append((upload_file.filename, data))
+        group["files"].append((upload_file.filename, upload_file))
 
     return grouped, rejected
 
