@@ -27,7 +27,7 @@ from anthropic import (
 )
 
 from app.core.config import settings
-from app.services.fields import FIELDS, NOT_PRESENT, normalise_payload
+from app.services.fields import FIELDS, NOT_PRESENT, normalise_payload, reconcile_tag_number
 
 logger = logging.getLogger(__name__)
 
@@ -195,13 +195,16 @@ class ClaudeExtractor:
         content.append({
             "type": "text",
             "text": (
-                f"These photographs show the nameplate for asset tag "
-                f"{tag_number} ({description}).\n"
-                f"The tag number and equipment description are already known from "
-                f"the asset register — copy them into the response unchanged and "
-                f"mark both Confirmed. If a *different* tag number is printed on "
-                f"the plate, keep the register value and flag the mismatch in "
-                f"remarks.\n\nReturn the JSON object now."
+                f"These photographs show a nameplate. For reference only, the "
+                f"batch register currently files these photos under tag number "
+                f"{tag_number} ({description}) — you do not need to match it.\n"
+                f"Read \"tag_number\" independently, straight off the physical "
+                f"plate in the photo(s), the same way you read every other "
+                f"field. Quality \"Confirmed\" only if it's clearly legible; "
+                f"\"Verify\" if uncertain or damaged. If no tag number is "
+                f"printed on the plate at all, set value to exactly "
+                f"\"{NOT_PRESENT}\" and quality \"Verify\".\n\n"
+                f"Return the JSON object now."
             ),
         })
 
@@ -230,7 +233,9 @@ class ClaudeExtractor:
         if not text.strip():
             raise ExtractionError("Claude returned an empty response")
 
-        payload = normalise_payload(_parse_json(text), tag_number, description)
+        raw = _parse_json(text)
+        final_tag_number = reconcile_tag_number(raw, tag_number)
+        payload = normalise_payload(raw, final_tag_number, description)
 
         return ExtractionResult(
             payload=payload,

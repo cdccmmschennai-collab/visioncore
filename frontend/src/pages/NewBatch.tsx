@@ -474,6 +474,16 @@ export default function NewBatch() {
         return
       }
 
+      const tagCount = new Set(staged.map((s) => stagedGroup(s).key)).size
+      if (tagCount > LIMITS.maxTagsPerBatchProcess) {
+        toast.error(
+          `That folder has ${tagCount} tags — Batch Process covers up to ` +
+          `${LIMITS.maxTagsPerBatchProcess} per run. Split it into smaller ` +
+          `folders and run Batch Process again for the rest.`,
+        )
+        return
+      }
+
       writeBackWarnedRef.current = false
       const response = await api.batchProcess(staged)
       batchProcessRunRef.current = response.batch.id

@@ -9,11 +9,16 @@ crafted tag number cannot escape the directory via `../`.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 
 from app.core.config import settings
 from app.services.filename_parser import safe_filename
+
+#: Chunk size for stream_upload's copy loop — bounds peak memory to roughly
+#: one chunk per file in flight, regardless of how large the file itself is.
+_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 def storage_root() -> Path:
@@ -44,12 +49,29 @@ def export_dir(tag_number: str) -> Path:
     return path
 
 
-def save_upload(batch_reference: str, tag_number: str, filename: str, data: bytes) -> Path:
-    """Store under a UUID so two photos with the same name cannot collide."""
+async def stream_upload(
+    batch_reference: str, tag_number: str, filename: str, upload_file
+) -> tuple[Path, str, int]:
+    """Copy an UploadFile straight to its permanent location in bounded
+    chunks, computing its SHA-256 hash and size along the way.
+
+    Stored under a UUID so two photos with the same name cannot collide —
+    same naming convention the old byte-buffering save_upload used. Unlike
+    reading the whole file into memory first, this never holds more than one
+    chunk at a time, which is what keeps a many-tag Batch Process upload from
+    needing the entire batch resident in memory at once.
+    """
     suffix = Path(filename).suffix.lower() or ".jpg"
     target = upload_dir(batch_reference, tag_number) / f"{uuid.uuid4().hex}{suffix}"
-    target.write_bytes(data)
-    return target
+    hasher = hashlib.sha256()
+    size = 0
+    await upload_file.seek(0)
+    with target.open("wb") as out:
+        while chunk := await upload_file.read(_STREAM_CHUNK_BYTES):
+            out.write(chunk)
+            hasher.update(chunk)
+            size += len(chunk)
+    return target, hasher.hexdigest(), size
 
 
 def ai_output_name(stem: str) -> str:
@@ -70,7 +92,7 @@ def local_path_for(path_str: str) -> Path:
     """Re-anchor a stored_path DB value onto this environment's storage root.
 
     stored_path is saved as an absolute path baked in on whichever machine
-    created the row (see save_upload/write_export below). A row pulled in by
+    created the row (see stream_upload/write_export above/below). A row pulled in by
     app/services/sync_client.py from another environment still carries
     *that* environment's absolute path — different OS, different install
     directory — which never lives under this machine's storage root. Rebuild
