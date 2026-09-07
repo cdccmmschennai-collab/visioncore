@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import BatchImagesModal from '@/components/BatchImagesModal'
+import ConfirmDialog from '@/components/ConfirmDialog'
 import EditableTable from '@/components/EditableTable'
+import TrashIcon from '@/components/icons/TrashIcon'
 import Modal from '@/components/Modal'
 import Pagination from '@/components/Pagination'
 import QualityChip from '@/components/QualityChip'
@@ -8,6 +10,7 @@ import Spinner from '@/components/Spinner'
 import { api } from '@/api/client'
 import { FIELD_ORDER, NOT_PRESENT, SEARCH_FIELDS } from '@/api/types'
 import type { AssetTag, ExtractionPayload, SearchResult } from '@/api/types'
+import { useAuth } from '@/store/AuthContext'
 import { useToast } from '@/store/ToastContext'
 
 const PAGE_SIZE = 12
@@ -18,6 +21,7 @@ interface Query {
 }
 
 export default function Search() {
+  const { isAdmin } = useAuth()
   const toast = useToast()
 
   const [field, setField] = useState(SEARCH_FIELDS[0].value)
@@ -37,6 +41,9 @@ export default function Search() {
   const [payloadView, setPayloadView] = useState<
     { title: string; payload: ExtractionPayload; variant: 'ai' | 'final' } | null
   >(null)
+
+  const [deleteTarget, setDeleteTarget] = useState<SearchResult | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const load = useCallback(async () => {
     if (!query) return
@@ -88,6 +95,21 @@ export default function Search() {
       toast.success(`Downloaded ${name}`)
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : 'Download failed.')
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      const result = await api.deleteTag(deleteTarget.id)
+      toast.success(result.message)
+      setDeleteTarget(null)
+      void load()
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not delete that tag.')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -156,6 +178,7 @@ export default function Search() {
                     <th>User</th>
                     <th style={{ width: 110 }}>View Details</th>
                     <th style={{ width: 110 }}>View Photo</th>
+                    {isAdmin && <th style={{ width: 90 }}>Action</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -208,6 +231,23 @@ export default function Search() {
                           <span className="muted">No Photo Available</span>
                         )}
                       </td>
+                      {isAdmin && (
+                        <td>
+                          {row.batch_id ? (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-danger"
+                              onClick={() => setDeleteTarget(row)}
+                              aria-label={`Delete tag ${row.tag_number}`}
+                              title="Delete tag"
+                            >
+                              <TrashIcon />
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -243,6 +283,15 @@ export default function Search() {
         batchId={viewingBatchId}
         itemId={viewingItemId}
         onClose={() => { setViewingBatchId(null); setViewingItemId(null) }}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={deleteTarget ? `Delete ${deleteTarget.tag_number}` : 'Delete tag'}
+        message="Are you sure you want to delete this tag? This permanently removes it and its extracted data."
+        busy={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
       />
 
       <Modal
