@@ -91,3 +91,15 @@ def resolve_stored(path_str: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(path_str)
     return path
+
+
+def remove_files(path_strs: list[str]) -> None:
+    """Best-effort cleanup after a DB delete — a file that's already missing
+    (or was never written) must never fail the request that already
+    committed the database change.
+    """
+    for path_str in path_strs:
+        try:
+            resolve_stored(path_str).unlink()
+        except (FileNotFoundError, ValueError, OSError):
+            continue

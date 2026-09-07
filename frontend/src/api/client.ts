@@ -252,6 +252,8 @@ export const api = {
     tagNumbers.forEach((tagNumber) => query.append('tag_numbers', tagNumber))
     return fetchBlob(`/tags/download-all/template?${query}`)
   },
+  deleteTag: (id: number) =>
+    request<{ message: string }>(`/tags/${id}`, { method: 'DELETE' }),
   searchTags: (params: { field: string; value: string; page?: number; pageSize?: number }) => {
     const query = new URLSearchParams({
       field: params.field,

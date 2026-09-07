@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import BatchImagesModal from '@/components/BatchImagesModal'
+import ConfirmDialog from '@/components/ConfirmDialog'
 import EditableTable from '@/components/EditableTable'
+import TrashIcon from '@/components/icons/TrashIcon'
 import Modal from '@/components/Modal'
 import Pagination from '@/components/Pagination'
 import SearchInput from '@/components/SearchInput'
@@ -55,6 +57,9 @@ export default function History() {
   // on this page); picking a tag only ever applies while All is unchecked.
   const [allSelected, setAllSelected] = useState(false)
   const [selectedTagNumbers, setSelectedTagNumbers] = useState<Set<string>>(new Set())
+
+  const [deleteTarget, setDeleteTarget] = useState<HistoryRow | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   // Debounce so a fast typist doesn't fire a request per keystroke.
   useEffect(() => {
@@ -138,6 +143,21 @@ export default function History() {
       toast.error(caught instanceof Error ? caught.message : 'Download failed.')
     } finally {
       setDownloadingAll(false)
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget?.asset_tag_id) return
+    setDeleting(true)
+    try {
+      const result = await api.deleteTag(deleteTarget.asset_tag_id)
+      toast.success(result.message)
+      setDeleteTarget(null)
+      void load()
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not delete that tag.')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -264,7 +284,7 @@ export default function History() {
                     </div>
                   </th>
                   <th>User</th>
-                  <th style={{ width: 120 }}>Details</th>
+                  <th style={{ width: isAdmin ? 200 : 120 }}>Details</th>
                 </tr>
               </thead>
               <tbody>
@@ -302,22 +322,34 @@ export default function History() {
                         </span>
                       </td>
                       <td className="muted">{row.username ?? '—'}</td>
-                      <td>
-                        {row.batch_id ? (
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-accent"
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              setViewingBatchId(row.batch_id)
-                              setViewingItemId(row.batch_item_id)
-                            }}
-                          >
-                            View photos
-                          </button>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
+                      <td onClick={(event) => event.stopPropagation()}>
+                        <div className="row gap-8">
+                          {row.batch_id ? (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-accent"
+                              onClick={() => {
+                                setViewingBatchId(row.batch_id)
+                                setViewingItemId(row.batch_item_id)
+                              }}
+                            >
+                              View photos
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                          {isAdmin && row.status === 'Completed' && row.asset_tag_id && (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-danger"
+                              onClick={() => setDeleteTarget(row)}
+                              aria-label={`Delete tag ${row.tag_number ?? ''}`}
+                              title="Delete tag"
+                            >
+                              <TrashIcon />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )
@@ -354,6 +386,15 @@ export default function History() {
         batchId={viewingBatchId}
         itemId={viewingItemId}
         onClose={() => { setViewingBatchId(null); setViewingItemId(null) }}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={deleteTarget?.tag_number ? `Delete ${deleteTarget.tag_number}` : 'Delete tag'}
+        message="Are you sure you want to delete this tag? This permanently removes it and its extracted data."
+        busy={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
       />
     </div>
   )

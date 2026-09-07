@@ -5,19 +5,19 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
-from app.core.deps import CurrentUser, DbSession
+from app.core.deps import AdminUser, CurrentUser, DbSession
 from app.models import Activity, ActivityAction, AssetTag, BatchItem, ItemStatus, TagImage, User, UserRole
-from app.schemas.common import Page
+from app.schemas.common import Message, Page
 from app.schemas.tag import AssetTagOut, SaveTagRequest, SearchResultOut
 from app.services.download_links import ai_excel_download_url, photo_view_url, verify_ai_excel_token
 from app.services.excel_template import build_template_workbook
 from app.services.fields import normalise_payload
 from app.services.filename_parser import excel_basename, safe_filename
 from app.services.pipeline import generate_workbooks, template_path_columns
-from app.services.storage import resolve_stored
+from app.services.storage import remove_files, resolve_stored
 
 logger = logging.getLogger(__name__)
 
@@ -408,3 +408,43 @@ async def download_ai_by_link(token: str, db: DbSession) -> FileResponse:
 @router.get("/{tag_id}/download/template")
 async def download_template(tag_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
     return await _download(db, await _get_tag(db, tag_id), "template", user)
+
+
+@router.delete("/{tag_id}", response_model=Message)
+async def delete_tag(tag_id: int, admin: AdminUser, db: DbSession) -> Message:
+    """Permanently remove a completed tag and everything tied to it.
+
+    Admin-only (enforced by `AdminUser`, independent of whatever the frontend
+    shows) and only for a tag that has actually completed extraction — the
+    same condition `search_tags`/`list_history` use to decide whether a tag
+    can be viewed at all. Deleting `BatchItem` rows here lets the existing
+    `tag_images.item_id` ON DELETE CASCADE remove their `TagImage` rows in
+    the database; the `AssetTag` row is removed last so callers never see a
+    tag with no batch items.
+    """
+    tag = await _get_tag(db, tag_id)
+
+    has_completed = await db.scalar(
+        select(func.count()).select_from(BatchItem)
+        .where(BatchItem.asset_tag_id == tag.id, BatchItem.status == ItemStatus.COMPLETED)
+    )
+    if not has_completed:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only a completed tag can be deleted.")
+
+    image_paths = (
+        await db.scalars(
+            select(TagImage.stored_path)
+            .join(BatchItem, BatchItem.id == TagImage.item_id)
+            .where(BatchItem.asset_tag_id == tag.id)
+        )
+    ).all()
+    excel_paths = [p for p in (tag.ai_excel_path, tag.template_excel_path) if p]
+
+    await db.execute(delete(BatchItem).where(BatchItem.asset_tag_id == tag.id))
+    tag_number = tag.tag_number
+    await db.delete(tag)
+    await db.commit()
+
+    remove_files([*image_paths, *excel_paths])
+
+    return Message(message=f"Tag {tag_number} has been deleted.")
