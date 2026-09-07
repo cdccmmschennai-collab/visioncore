@@ -81,8 +81,10 @@ def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
 
     Defensive by design: a model response is untrusted input. Missing keys are
     filled, unknown keys dropped, and quality marks constrained to the two
-    legal values. Tag number and description always come from the filename —
-    they are ground truth from the folder structure, not something to infer.
+    legal values. `description` always comes from the filename. `tag_number`
+    is whatever the caller has already decided is final — the filename value,
+    or the AI's own plate reading when it disagrees (see
+    `reconcile_tag_number` below) — never re-derived here.
     """
     out = empty_payload(tag_number, description)
     raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
@@ -106,7 +108,7 @@ def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
             value = value.zfill(2)
         out["fields"][f.key] = {"value": value or NOT_PRESENT, "quality": quality}
 
-    # Filename wins for identity fields.
+    # The caller's tag_number/description win for identity fields.
     out["fields"]["tag_number"] = {"value": tag_number, "quality": QUALITY_CONFIRMED}
     out["fields"]["description"] = {"value": description, "quality": QUALITY_CONFIRMED}
 
@@ -114,6 +116,22 @@ def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
     out["photo_status"] = str(raw.get("photo_status", "") or "").strip()
     out["qc_comment"] = str(raw.get("qc_comment", "") or "").strip()
     return out
+
+
+def reconcile_tag_number(raw: dict, filename_tag_number: str) -> str:
+    """Prefer the tag number actually printed on the nameplate over the one
+    parsed from the filename — but only when the AI found one on the plate
+    and it disagrees with the filename. No independent read (or one that
+    just confirms the filename) changes nothing.
+    """
+    raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
+    entry = raw_fields.get("tag_number")
+    photo_value = str(entry.get("value", "") or "").strip() if isinstance(entry, dict) else ""
+    if is_blank(photo_value):
+        return filename_tag_number
+    if photo_value.upper() == filename_tag_number.strip().upper():
+        return filename_tag_number
+    return photo_value.upper()
 
 
 def value_of(payload: dict, key: str) -> str:

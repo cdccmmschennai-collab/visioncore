@@ -34,6 +34,7 @@ from app.services.claude_extractor import ExtractionError
 from app.services.excel_ai import build_ai_workbook
 from app.services.download_links import ai_excel_download_url, photo_view_url
 from app.services.excel_template import build_template_workbook
+from app.services.fields import value_of
 from app.services.filename_parser import excel_basename
 from app.services.storage import (
     ai_output_name,
@@ -208,9 +209,14 @@ async def process_item(item_id: int, user_id: int) -> None:
 
         await _set_status(session, item, ItemStatus.PROCESSING)
 
+        # The AI's own plate reading wins over the filename when it found one
+        # and it disagrees (see claude_extractor.extract/reconcile_tag_number)
+        # — this is the record's real identity from here on, not item.tag_number.
+        final_tag_number = value_of(result.payload, "tag_number")
+
         # final_payload starts as a copy of the AI's answer; edits diverge it.
         asset_tag = AssetTag(
-            tag_number=item.tag_number,
+            tag_number=final_tag_number,
             description=item.description,
             ai_payload=result.payload,
             final_payload=result.payload,
@@ -220,10 +226,13 @@ async def process_item(item_id: int, user_id: int) -> None:
         try:
             await session.flush()
         except IntegrityError:
-            # Lost the race against a concurrent batch; report, don't fail.
+            # Lost the race against a concurrent batch (or two differently
+            # named files turned out to be the same physical tag once read);
+            # report, don't fail. Look up by final_tag_number — that's the
+            # value that actually collided, not necessarily item.tag_number.
             await session.rollback()
             existing = await session.scalar(
-                select(AssetTag).where(AssetTag.tag_number == item.tag_number)
+                select(AssetTag).where(AssetTag.tag_number == final_tag_number)
             )
             if existing:
                 item.asset_tag_id = existing.id
@@ -243,7 +252,10 @@ async def process_item(item_id: int, user_id: int) -> None:
         item.error_message = None
         session.add(Activity(
             user_id=user_id, action=ActivityAction.EXTRACT,
-            tag_number=item.tag_number, description=item.description,
+            # Must match asset_tag.tag_number, not item.tag_number — History's
+            # query joins AssetTag.tag_number == Activity.tag_number to resolve
+            # this row's tag, which breaks silently if they ever diverge.
+            tag_number=final_tag_number, description=item.description,
             detail=f"Extracted from {len(photo_paths)} photo(s)",
             meta={"input_tokens": result.input_tokens,
                   "output_tokens": result.output_tokens,
