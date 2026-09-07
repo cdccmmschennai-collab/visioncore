@@ -413,7 +413,12 @@ async def _serve_image(image: TagImage) -> FileResponse:
             status.HTTP_404_NOT_FOUND, "The photo file is missing from storage."
         ) from None
 
-    return FileResponse(path=path, filename=image.original_filename, media_type=image.media_type)
+    return FileResponse(
+        path=path,
+        filename=image.original_filename,
+        media_type=image.media_type,
+        content_disposition_type="inline",
+    )
 
 
 @router.get("/{batch_id}/images/{image_id}")
