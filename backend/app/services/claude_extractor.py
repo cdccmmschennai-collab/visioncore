@@ -10,10 +10,10 @@ The prompt asks for JSON only. Model output is still treated as untrusted —
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
-import mimetypes
 import re
 import time
 from dataclasses import dataclass
@@ -28,11 +28,9 @@ from anthropic import (
 
 from app.core.config import settings
 from app.services.fields import FIELDS, NOT_PRESENT, normalise_payload, reconcile_tag_number
+from app.services.image_optimizer import ALLOWED_MEDIA_TYPES, prepare_images_for_claude
 
 logger = logging.getLogger(__name__)
-
-#: Anthropic's vision endpoint accepts these media types only.
-ALLOWED_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
@@ -149,16 +147,11 @@ hazardous_classification holds the complete "EX..." string unmodified.
 """
 
 
-def _encode_image(path: str | Path) -> dict:
-    p = Path(path)
-    media_type, _ = mimetypes.guess_type(p.name)
-    # .jfif and friends resolve oddly across platforms; JPEG is the safe default.
-    if media_type not in ALLOWED_MEDIA_TYPES:
-        media_type = "image/jpeg"
-    data = base64.standard_b64encode(p.read_bytes()).decode("ascii")
+def _image_block(optimized) -> dict:
+    data = base64.standard_b64encode(optimized.data).decode("ascii")
     return {
         "type": "image",
-        "source": {"type": "base64", "media_type": media_type, "data": data},
+        "source": {"type": "base64", "media_type": optimized.media_type, "data": data},
     }
 
 
@@ -201,10 +194,28 @@ class ClaudeExtractor:
         if not image_paths:
             raise ExtractionError("No images supplied for extraction")
 
+        # Compression/optimization happens fully here, BEFORE anything is
+        # base64-encoded or handed to the Anthropic client — never send the
+        # originals first and shrink them after the fact. Each photo is
+        # optimized (and validated) individually; only if the tag's combined
+        # payload would still be oversized does this tighten the largest
+        # photo(s) further — see image_optimizer.prepare_images_for_claude.
+        # Off the event loop: reading multi-MB files and, for large photos,
+        # resizing/re-encoding them in Pillow are blocking calls that would
+        # otherwise stall every other coroutine (DB queries, other tags'
+        # progress polling) for their duration. One call for the whole tag,
+        # not one per photo, so the combined-payload check sees every photo
+        # in the tag at once rather than one at a time.
+        optimized_images = await asyncio.to_thread(
+            prepare_images_for_claude, [Path(p) for p in image_paths]
+        )
+
         content: list[dict] = []
-        for index, path in enumerate(image_paths, start=1):
-            content.append({"type": "text", "text": f"Photo {index} of {len(image_paths)}:"})
-            content.append(_encode_image(path))
+        payload_bytes = 0
+        for index, optimized in enumerate(optimized_images, start=1):
+            content.append({"type": "text", "text": f"Photo {index} of {len(optimized_images)}:"})
+            content.append(_image_block(optimized))
+            payload_bytes += optimized.final_bytes
 
         content.append({
             "type": "text",
@@ -254,7 +265,32 @@ class ClaudeExtractor:
             block.text for block in response.content if getattr(block, "type", "") == "text"
         )
         if not text.strip():
-            raise ExtractionError("Claude returned an empty response")
+            # Never seen bare "the model said nothing" without a reason —
+            # log enough to actually diagnose it next time (stop_reason,
+            # token usage, what kind of content blocks came back, and this
+            # request's photo count/payload size) without logging the image
+            # bytes themselves or any secret. stop_reason == "max_tokens"
+            # with no visible text usually means the response was cut off
+            # before any JSON was emitted; other stop reasons point at a
+            # genuinely empty/filtered generation instead.
+            block_types = [getattr(block, "type", "?") for block in response.content]
+            logger.warning(
+                "Claude returned no text for tag %s: stop_reason=%s, "
+                "output_tokens=%s, input_tokens=%s, content_block_types=%s, "
+                "photos=%d, optimized_payload_bytes=%d, model=%s",
+                tag_number, response.stop_reason, response.usage.output_tokens,
+                response.usage.input_tokens, block_types, len(optimized_images),
+                payload_bytes, self._model,
+            )
+            # Treat as retryable (bounded by the caller's existing
+            # extraction_max_retries) rather than failing the tag outright —
+            # an empty generation is far more often a one-off API hiccup
+            # than a deterministic "this request can never succeed" case,
+            # especially now that the request itself is pre-validated and
+            # size-budgeted above. It is NOT retried without limit: the
+            # outer loop in pipeline.py.process_item still gives up after
+            # extraction_max_retries attempts.
+            raise ExtractionError("Claude returned an empty response", retryable=True)
 
         raw = _parse_json(text)
         final_tag_number = reconcile_tag_number(raw, tag_number)

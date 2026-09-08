@@ -28,26 +28,47 @@ async def create_batch_with_items(
     user,
     *,
     is_batch_process: bool = False,
-) -> tuple[Batch, list[AssetTag]]:
-    """Create one Batch plus one BatchItem (and its TagImages) per entry.
+    batch: Batch | None = None,
+) -> tuple[Batch, list[AssetTag], list[int]]:
+    """Create one Batch plus one BatchItem (and its TagImages) per entry, or
+    add to an existing one.
 
     `grouped` maps tag_number -> {"description": str, "files": [(filename, UploadFile), ...]}.
-    Returns the created Batch and the AssetTag rows found to already exist
-    (marked DUPLICATE on the batch rather than re-extracted) — same semantics
-    the `/batches/upload` endpoint has always had.
+    Returns the Batch, the AssetTag rows found to already exist (marked
+    DUPLICATE on the batch rather than re-extracted — same semantics the
+    `/batches/upload` endpoint has always had), and the ids of the new
+    (non-duplicate, UPLOADED) BatchItems this call just created.
+
+    Pass an existing `batch` (a prior chunk of the same Batch Process run —
+    see api/v1/batches.py's `batch_id` form field) to append these items to
+    it instead of creating a new Batch row. `total_images`/`total_tags`
+    accumulate either way, so this is a no-op change for every existing
+    caller that never passes `batch`.
+
+    Callers should hand the returned item ids to `process_batch(..., item_ids=...)`
+    rather than letting it re-scan the whole batch for UPLOADED items — when
+    a Batch Process run is chunked, several `process_batch` calls can be
+    in flight for the same batch_id at once (one per uploaded chunk), and a
+    fresh "every UPLOADED item in the batch" scan from a later chunk's call
+    would re-dispatch an earlier chunk's item that just hasn't started yet,
+    processing it twice concurrently.
     """
-    batch = Batch(
-        reference=reference,
-        user_id=user.id,
-        status=BatchStatus.UPLOADED,
-        total_images=sum(len(g["files"]) for g in grouped.values()),
-        total_tags=len(grouped),
-        is_batch_process=is_batch_process,
-    )
-    db.add(batch)
-    await db.flush()
+    if batch is None:
+        batch = Batch(
+            reference=reference,
+            user_id=user.id,
+            status=BatchStatus.UPLOADED,
+            total_images=0,
+            total_tags=0,
+            is_batch_process=is_batch_process,
+        )
+        db.add(batch)
+        await db.flush()
+    batch.total_images += sum(len(g["files"]) for g in grouped.values())
+    batch.total_tags += len(grouped)
 
     duplicates: list[AssetTag] = []
+    new_item_ids: list[int] = []
 
     for tag_number, group in grouped.items():
         existing = await db.scalar(select(AssetTag).where(AssetTag.tag_number == tag_number))
@@ -62,6 +83,8 @@ async def create_batch_with_items(
         )
         db.add(item)
         await db.flush()
+        if not existing:
+            new_item_ids.append(item.id)
 
         for original_name, upload_file in group["files"]:
             # Streamed straight to disk in chunks (never the whole file in
@@ -120,4 +143,4 @@ async def create_batch_with_items(
             ))
 
     await db.commit()
-    return batch, duplicates
+    return batch, duplicates, new_item_ids
