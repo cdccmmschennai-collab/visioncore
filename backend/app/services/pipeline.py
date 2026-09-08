@@ -292,8 +292,27 @@ async def process_item(item_id: int, user_id: int) -> None:
         await session.commit()
 
 
+#: Statuses a batch item never leaves without a further process_item/retry
+#: call — anything outside this set means the batch is not actually done yet.
+_TERMINAL_ITEM_STATUSES = {ItemStatus.COMPLETED, ItemStatus.FAILED, ItemStatus.DUPLICATE}
+
+
 async def _rollup_batch_status(batch_id: int) -> None:
-    """Recompute a batch's status from its items' current statuses."""
+    """Recompute a batch's status from its items' current statuses.
+
+    Only finalizes once every item is itself terminal. `process_batch` used
+    to be the only caller, always after a `gather()` over every item in the
+    batch — every item was guaranteed terminal by the time this ran. A
+    chunked Batch Process run (see api/v1/batches.py's `batch_id` append
+    path) calls `process_batch` once per uploaded chunk, so this can now run
+    while a later chunk's items are still UPLOADED (not yet dispatched) or an
+    earlier chunk's items are still mid-extraction — without this guard that
+    would read as "no FAILED present" and mark the whole batch COMPLETED
+    early. Leaving status untouched here is safe: the chunk whose own items
+    are the last to reach a terminal state will always trigger one more
+    rollup call afterward, and it re-derives status from the full current
+    item set rather than a stale one.
+    """
     async with AsyncSessionLocal() as session:
         batch = await session.scalar(
             select(Batch).options(selectinload(Batch.items)).where(Batch.id == batch_id)
@@ -301,6 +320,8 @@ async def _rollup_batch_status(batch_id: int) -> None:
         if batch is None:
             return
         statuses = {i.status for i in batch.items}
+        if not statuses <= _TERMINAL_ITEM_STATUSES:
+            return
         if ItemStatus.FAILED not in statuses:
             batch.status = BatchStatus.COMPLETED
         elif statuses <= {ItemStatus.FAILED}:
@@ -316,9 +337,22 @@ async def _process_item_bounded(item_id: int, user_id: int) -> None:
         await process_item(item_id, user_id)
 
 
-async def process_batch(batch_id: int, user_id: int) -> None:
+async def process_batch(batch_id: int, user_id: int, item_ids: list[int] | None = None) -> None:
     """Run every pending tag in a batch — up to EXTRACTION_MAX_CONCURRENCY at
-    once, globally, not one-at-a-time — then roll the batch status up."""
+    once, globally, not one-at-a-time — then roll the batch status up.
+
+    `item_ids`, when given, scopes this call to exactly those items instead
+    of re-scanning the batch for every currently-UPLOADED item. A chunked
+    Batch Process run (see api/v1/batches.py's `batch_id` append path) fires
+    one `process_batch` call per uploaded chunk, so more than one can be in
+    flight for the same batch at once — an unscoped scan from a later
+    chunk's call would also pick up an earlier chunk's item that just hasn't
+    started yet, dispatching `process_item` for it twice concurrently.
+    Passing the exact ids this caller is responsible for avoids that. Omit
+    it (the default) for a single, non-chunked run — e.g. `/batches/upload`
+    or `requeue_orphaned_items` — where re-scanning is exactly the wanted
+    behavior (pick up everything still pending, from whatever created it).
+    """
     async with AsyncSessionLocal() as session:
         batch = await session.scalar(
             select(Batch).options(selectinload(Batch.items)).where(Batch.id == batch_id)
@@ -326,7 +360,8 @@ async def process_batch(batch_id: int, user_id: int) -> None:
         if batch is None:
             return
         batch.status = BatchStatus.PROCESSING
-        item_ids = [i.id for i in batch.items if i.status == ItemStatus.UPLOADED]
+        if item_ids is None:
+            item_ids = [i.id for i in batch.items if i.status == ItemStatus.UPLOADED]
         await session.commit()
 
     # return_exceptions=True: process_item already never raises by design,

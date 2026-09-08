@@ -194,12 +194,17 @@ export const api = {
   },
   // Extracts every tag the browser found scanning a local folder — see
   // frontend/src/utils/folderAccess.ts. Same multipart shape as `upload`.
-  batchProcess: (staged: StagedFile[]) => {
+  // `batchId`, when set, appends this chunk to that already-started Batch
+  // Process run instead of starting a new one — see chunkStagedFiles in
+  // utils/upload.ts and runBatchProcess in pages/NewBatch.tsx, which loop
+  // this call once per chunk of a large run.
+  batchProcess: (staged: StagedFile[], batchId?: number) => {
     const form = new FormData()
     staged.forEach(({ file, folder }) => {
       form.append('files', file, file.name)
       form.append('folders', folder ?? '')
     })
+    if (batchId != null) form.append('batch_id', String(batchId))
     return request<UploadResponse>('/batches/batch-process', { method: 'POST', formData: form })
   },
   getBatch: (id: number, signal?: AbortSignal) =>

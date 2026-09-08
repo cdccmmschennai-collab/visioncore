@@ -41,7 +41,12 @@ class Settings(BaseSettings):
     # ── Claude ───────────────────────────────────────────────────────────────
     anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
     claude_model: str = Field("claude-sonnet-5", alias="CLAUDE_MODEL")
-    claude_max_tokens: int = Field(4096, alias="CLAUDE_MAX_TOKENS")
+    # Raised from 4096: a too-tight ceiling risks the model being cut off
+    # before it finishes the JSON payload on a dense multi-photo nameplate
+    # tag, which can surface as an empty/truncated response rather than a
+    # clean answer. The API only bills for tokens actually generated, so a
+    # higher ceiling costs nothing when the model finishes well under it.
+    claude_max_tokens: int = Field(8192, alias="CLAUDE_MAX_TOKENS")
     claude_input_price_per_mtok: float = Field(3.00, alias="CLAUDE_INPUT_PRICE_PER_MTOK")
     claude_output_price_per_mtok: float = Field(15.00, alias="CLAUDE_OUTPUT_PRICE_PER_MTOK")
     # An Admin API key (`sk-ant-admin01-...`), distinct from the regular API
@@ -51,6 +56,38 @@ class Settings(BaseSettings):
     # frontend. Leave blank and the dashboard reports itself unavailable
     # rather than showing any locally estimated figures.
     anthropic_admin_api_key: str = Field("", alias="ANTHROPIC_ADMIN_API_KEY")
+    # ── Claude image optimization (temporary, in-memory copies only — see
+    # app/services/image_optimizer.py) ─────────────────────────────────────
+    # A photo at or under BOTH thresholds is sent to Claude completely
+    # unmodified — no re-encode, no quality loss, the file on disk is never
+    # touched either way. Only a photo that exceeds one of these gets a
+    # resized/recompressed copy built in memory for that one Claude request.
+    # 1600px: Anthropic's vision pipeline itself resizes the long edge down
+    # to ~1568px before reading an image, so sending noticeably more than
+    # that spends extra payload bytes and tokens without any OCR benefit —
+    # 1600 keeps a small margin above that internal cap rather than cutting
+    # it exactly at it.
+    claude_image_max_dimension_px: int = Field(1600, alias="CLAUDE_IMAGE_MAX_DIMENSION_PX")
+    claude_image_max_bytes: int = Field(4 * 1024 * 1024, alias="CLAUDE_IMAGE_MAX_BYTES")
+    # Moderate compression only — see docstring above; OCR accuracy on small
+    # stamped/etched nameplate text matters far more than a smaller payload,
+    # so this defaults high rather than chasing maximum size reduction.
+    claude_image_jpeg_quality: int = Field(88, alias="CLAUDE_IMAGE_JPEG_QUALITY")
+    # Hard ceiling on ONE photo's optimized output. If the standard pass
+    # above is still over this (an unusually detailed/noisy photo), a
+    # second, more conservative pass (smaller dimension, lower quality) is
+    # tried before accepting whatever came out smallest — see
+    # image_optimizer.optimize_for_claude. Comfortably under Anthropic's
+    # documented ~5 MB per-image limit even after base64's ~33% inflation.
+    claude_image_hard_max_bytes: int = Field(3 * 1024 * 1024, alias="CLAUDE_IMAGE_HARD_MAX_BYTES")
+    # Combined budget across ALL of one tag's optimized photos (raw bytes,
+    # before base64) — a multi-photo tag (e.g. 4 photos) can still add up to
+    # an oversized request even when each photo individually cleared the cap
+    # above. If the total exceeds this, the largest photo(s) get one more,
+    # more aggressive pass rather than the request going out oversized — see
+    # image_optimizer.prepare_images_for_claude. Sized to comfortably clear
+    # Anthropic's overall request-size limits for a typical 3-5 photo tag.
+    claude_request_max_bytes: int = Field(12 * 1024 * 1024, alias="CLAUDE_REQUEST_MAX_BYTES")
     # Pure display conversion of Anthropic's official USD spend — never sent
     # to Anthropic, never treated as data Anthropic returned.
     usd_to_inr_rate: float = Field(83.00, alias="USD_TO_INR_RATE")
@@ -99,7 +136,11 @@ class Settings(BaseSettings):
     # from a server-local path, so it works the same whether the backend is
     # local or a remote deployment. It covers far more tags per run than a
     # normal drag-drop upload, hence the separate, higher ceiling.
-    max_tags_per_batch_process: int = Field(100, alias="MAX_TAGS_PER_BATCH_PROCESS")
+    # Raised from 100: a run of 300-500 photos at ~4 photos/tag is 125-150+
+    # tags, and the frontend now uploads a Batch Process run in sequential
+    # chunks anyway (see frontend/src/utils/upload.ts chunkStagedFiles), so a
+    # higher tag ceiling here no longer means a single giant request.
+    max_tags_per_batch_process: int = Field(200, alias="MAX_TAGS_PER_BATCH_PROCESS")
 
     # ── Template path columns ────────────────────────────────────────────────
     # The reference workbook records the network location of each photo and

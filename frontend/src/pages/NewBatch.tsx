@@ -19,7 +19,7 @@ import {
 } from '@/utils/folderAccess'
 import { pushExtractedWorkbooks, pushTemplateRevision } from '@/services/localHelper'
 import { formatFileSize } from '@/utils/filename'
-import { stagedGroup, type StagedFile } from '@/utils/upload'
+import { chunkStagedFiles, stagedGroup, type StagedFile } from '@/utils/upload'
 import { useToast } from '@/store/ToastContext'
 
 const POLL_MS = 2500
@@ -68,6 +68,12 @@ export default function NewBatch() {
   // fires for that one batch and never for a normal upload or a batch
   // reopened from History (whose id will never match).
   const [batchProcessing, setBatchProcessing] = useState(false)
+  // Set only while runBatchProcess's chunked upload loop is in flight, so
+  // the button can show "Uploading 3/12…" — a 300-500 image run is sent as
+  // several sequential requests (see chunkStagedFiles in utils/upload.ts),
+  // which for a slow connection can itself take a while, separately from
+  // the extraction progress bar that appears once uploading is done.
+  const [uploadChunkProgress, setUploadChunkProgress] = useState<{ done: number; total: number } | null>(null)
   const batchProcessRunRef = useRef<number | null>(null)
   // The local folder the current (or most recently completed) Batch Process
   // run was picked from, and which batch id it belongs to — kept around
@@ -486,20 +492,61 @@ export default function NewBatch() {
       }
 
       writeBackWarnedRef.current = false
-      const response = await api.batchProcess(staged)
-      batchProcessRunRef.current = response.batch.id
-      batchProcessDirRef.current = { dir, batchId: response.batch.id }
-      setBatch(response.batch)
-      setRejected(response.rejected)
+      // Sent as several sequential requests, not one giant multi-GB one —
+      // each chunk is a whole group of tags (never splits one tag's own
+      // photos across two requests) and appends to the same Batch via
+      // batch_id, so a network blip only costs a retry of the current
+      // chunk. A folder small enough to fit LIMITS.batchProcessChunkMaxTags/
+      // MaxBytes in one chunk behaves exactly as before (one request).
+      const chunks = chunkStagedFiles(
+        staged, LIMITS.batchProcessChunkMaxTags, LIMITS.batchProcessChunkMaxBytes,
+      )
+
+      let batchId: number | null = null
+      let latestBatch: Batch | null = null
+      const allRejected: RejectedFile[] = []
+      let uploadFailed = false
+
+      setUploadChunkProgress({ done: 0, total: chunks.length })
+      for (let i = 0; i < chunks.length; i++) {
+        try {
+          const response = await api.batchProcess(chunks[i], batchId ?? undefined)
+          batchId = response.batch.id
+          latestBatch = response.batch
+          allRejected.push(...response.rejected)
+          setUploadChunkProgress({ done: i + 1, total: chunks.length })
+        } catch (caught) {
+          uploadFailed = true
+          const message = caught instanceof Error ? caught.message : 'Upload failed.'
+          toast.error(
+            batchId != null
+              ? `${message} — ${i} of ${chunks.length} chunk(s) uploaded before this failed. ` +
+                'Run Batch Process again on the same folder to pick up the rest ' +
+                '(already-extracted tags are skipped automatically).'
+              : message,
+          )
+          break
+        }
+      }
+      setUploadChunkProgress(null)
+
+      if (batchId == null || latestBatch == null) return
+
+      batchProcessRunRef.current = batchId
+      batchProcessDirRef.current = { dir, batchId }
+      setBatch(latestBatch)
+      setRejected(allRejected)
       setFiles([])
 
-      if (response.rejected.length > 0) {
-        toast.warn(`${response.rejected.length} file(s) couldn't be read and were skipped.`)
+      if (allRejected.length > 0) {
+        toast.warn(`${allRejected.length} file(s) couldn't be read and were skipped.`)
       }
-      toast.success(
-        `Batch Process started — extracting ${response.batch.total_tags} tag${response.batch.total_tags === 1 ? '' : 's'}…`,
-      )
-      startPolling(response.batch.id)
+      if (!uploadFailed) {
+        toast.success(
+          `Batch Process started — extracting ${latestBatch.total_tags} tag${latestBatch.total_tags === 1 ? '' : 's'}…`,
+        )
+      }
+      startPolling(batchId)
     } catch (caught) {
       // The user closing the folder picker without choosing anything is not
       // an error worth surfacing.
@@ -598,7 +645,11 @@ export default function NewBatch() {
             title="Pick a local folder and extract every tag folder inside it"
           >
             {batchProcessing ? <Spinner size={14} /> : null}
-            {batchProcessing ? 'Scanning…' : 'Batch Process'}
+            {batchProcessing
+              ? (uploadChunkProgress
+                  ? `Uploading ${uploadChunkProgress.done}/${uploadChunkProgress.total}…`
+                  : 'Scanning…')
+              : 'Batch Process'}
           </button>
           <button type="button" className="btn btn-primary" onClick={startOver}>
             New Batch

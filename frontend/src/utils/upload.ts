@@ -24,6 +24,58 @@ export function stagedGroup(staged: StagedFile): { key: string; parsed: ParsedNa
   return { key, parsed }
 }
 
+/**
+ * Split a Batch Process run's staged files into sequential upload chunks,
+ * grouped by whole tag (never splitting one tag's own photos across two
+ * chunks), each capped at `maxTagsPerChunk` tags and `maxBytesPerChunk`
+ * bytes — whichever limit a chunk hits first. A single tag whose own photos
+ * already exceed `maxBytesPerChunk` still becomes its own one-tag chunk
+ * rather than being rejected or split.
+ *
+ * Order-preserving: chunks (and files within each chunk) come out in the
+ * same tag order `scanTagFolders` found them in.
+ */
+export function chunkStagedFiles(
+  staged: StagedFile[],
+  maxTagsPerChunk: number,
+  maxBytesPerChunk: number,
+): StagedFile[][] {
+  const groups = new Map<string, StagedFile[]>()
+  const order: string[] = []
+  for (const item of staged) {
+    const { key } = stagedGroup(item)
+    if (!groups.has(key)) {
+      groups.set(key, [])
+      order.push(key)
+    }
+    groups.get(key)!.push(item)
+  }
+
+  const chunks: StagedFile[][] = []
+  let current: StagedFile[] = []
+  let currentTags = 0
+  let currentBytes = 0
+
+  for (const key of order) {
+    const group = groups.get(key)!
+    const groupBytes = group.reduce((sum, s) => sum + s.file.size, 0)
+    const wouldOverflow =
+      current.length > 0 &&
+      (currentTags + 1 > maxTagsPerChunk || currentBytes + groupBytes > maxBytesPerChunk)
+    if (wouldOverflow) {
+      chunks.push(current)
+      current = []
+      currentTags = 0
+      currentBytes = 0
+    }
+    current.push(...group)
+    currentTags += 1
+    currentBytes += groupBytes
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
 /** Files picked via a plain `<input type="file">` — never folder-sourced. */
 export function stagedFromFiles(files: FileList | File[]): StagedFile[] {
   return Array.from(files).map((file) => ({ file, folder: null }))

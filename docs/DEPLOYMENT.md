@@ -81,6 +81,16 @@ yourdomain.com {
 sudo systemctl reload caddy
 ```
 
+No `request_body` size limit needs adding — Caddy's `reverse_proxy` has no
+default body-size cap (unlike nginx's 1 MB default), so a large Batch Process
+upload passes through untouched. The frontend container's own nginx (see
+`frontend/nginx.conf`) already sets `client_max_body_size 5G` for `/api/`,
+and the frontend now uploads a large Batch Process run in ~150 MB chunks
+(see `frontend/src/utils/upload.ts`'s `chunkStagedFiles`), so neither needs
+raising for a normal 300-500 image run. If you deploy behind a different
+reverse proxy that does cap request size by default, raise it there the same
+way.
+
 In `docker-compose.yml`, bind the exposed ports to localhost only, so Caddy
 can reach them but the internet can't:
 

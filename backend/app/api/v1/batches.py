@@ -249,12 +249,11 @@ async def upload(
         )
 
     reference = f"B-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
-    batch, duplicate_tags = await create_batch_with_items(db, reference, grouped, user)
+    batch, duplicate_tags, new_item_ids = await create_batch_with_items(db, reference, grouped, user)
     duplicates = [_asset_tag_out(t) for t in duplicate_tags]
 
-    duplicate_numbers = {t.tag_number for t in duplicate_tags}
-    if any(tag_number not in duplicate_numbers for tag_number in grouped):
-        background.add_task(process_batch, batch.id, user.id)
+    if new_item_ids:
+        background.add_task(process_batch, batch.id, user.id, new_item_ids)
 
     batch = await _load_batch(db, batch.id, user)
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
@@ -267,6 +266,7 @@ async def batch_process(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
     folders: list[str] | None = Form(None),
+    batch_id: int | None = Form(None),
 ) -> UploadResponse:
     """Extract every tag the browser found when it scanned the user's local
     Batch Process folder (see frontend/src/utils/folderAccess.ts).
@@ -277,17 +277,42 @@ async def batch_process(
     on the created Batch, which the frontend uses to write the AI Extraction
     and Consolidate file outputs back into the picked folder as each tag
     completes, in place of what a server-local export used to do here.
+
+    A run with many large photos (300-500 images) is sent by the frontend as
+    several sequential requests instead of one giant one (see
+    frontend/src/utils/upload.ts `chunkStagedFiles` and NewBatch.tsx
+    `runBatchProcess`) — one flaky moment then costs a retry of the current
+    chunk, not the whole run, and neither the browser nor the server ever
+    needs to hold the entire run's bytes at once. `batch_id`, when set, is
+    that same run's first chunk's Batch id: this chunk's tags are appended to
+    it (via `create_batch_with_items`'s `batch=` param) instead of starting a
+    new Batch/reference. Omit it for a normal, single-chunk run (including
+    every existing caller) and behavior is unchanged from before chunking.
     """
     if not files:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No tag folders with images were found to process.")
 
+    existing_batch = None
+    if batch_id is not None:
+        existing_batch = await db.scalar(select(Batch).where(Batch.id == batch_id))
+        if (
+            existing_batch is None
+            or existing_batch.user_id != user.id
+            or not existing_batch.is_batch_process
+        ):
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "That Batch Process run no longer exists. Start Batch Process again.",
+            )
+
     grouped, rejected = await _group_uploads(files, folders)
 
-    if len(grouped) > settings.max_tags_per_batch_process:
+    already_queued = existing_batch.total_tags if existing_batch else 0
+    if already_queued + len(grouped) > settings.max_tags_per_batch_process:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"A Batch Process run covers up to {settings.max_tags_per_batch_process} tags. "
-            f"Your selection has {len(grouped)}.",
+            f"Your selection has {already_queued + len(grouped)}.",
         )
     if not grouped:
         raise HTTPException(
@@ -295,15 +320,24 @@ async def batch_process(
             "No tag folders with images were found to process.",
         )
 
-    reference = f"BP-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
-    batch, duplicate_tags = await create_batch_with_items(
-        db, reference, grouped, user, is_batch_process=True
+    reference = existing_batch.reference if existing_batch else (
+        f"BP-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
+    )
+    batch, duplicate_tags, new_item_ids = await create_batch_with_items(
+        db, reference, grouped, user, is_batch_process=True, batch=existing_batch
     )
     duplicates = [_asset_tag_out(t) for t in duplicate_tags]
 
-    duplicate_numbers = {t.tag_number for t in duplicate_tags}
-    if any(tag_number not in duplicate_numbers for tag_number in grouped):
-        background.add_task(process_batch, batch.id, user.id)
+    # An appended chunk always schedules a process_batch call — even with
+    # zero new items (e.g. every tag in this chunk was already extracted) —
+    # so a rollup runs after every chunk lands; that's what guarantees some
+    # later call sees the complete, final item set once every chunk is in
+    # (see process_batch's item_ids param and _rollup_batch_status in
+    # app/services/pipeline.py for why an unscoped rescan would race here).
+    # The very first chunk keeps the original "nothing new, don't bother"
+    # behavior, since a single-chunk run has no such race to guard against.
+    if new_item_ids or existing_batch is not None:
+        background.add_task(process_batch, batch.id, user.id, new_item_ids)
 
     batch = await _load_batch(db, batch.id, user)
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
