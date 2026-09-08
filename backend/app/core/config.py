@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # 1600 keeps a small margin above that internal cap rather than cutting
     # it exactly at it.
     claude_image_max_dimension_px: int = Field(1600, alias="CLAUDE_IMAGE_MAX_DIMENSION_PX")
-    claude_image_max_bytes: int = Field(4 * 1024 * 1024, alias="CLAUDE_IMAGE_MAX_BYTES")
+    claude_image_max_bytes: int = Field(6 * 1024 * 1024, alias="CLAUDE_IMAGE_MAX_BYTES")
     # Moderate compression only — see docstring above; OCR accuracy on small
     # stamped/etched nameplate text matters far more than a smaller payload,
     # so this defaults high rather than chasing maximum size reduction.
