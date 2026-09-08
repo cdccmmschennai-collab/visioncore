@@ -59,12 +59,28 @@ class SearchResultOut(AssetTagOut):
     batch_item_id: int | None = None
 
 
+class ItemProgress(BaseModel):
+    """Live status-bucket counts, safe under concurrent workers because it's
+    re-derived from each item's current status on every read (see
+    _progress_counts in app/api/v1/batches.py) — never a persisted,
+    incrementally-updated counter that could race.
+    """
+    total: int = 0
+    completed: int = 0
+    processing: int = 0    # EXTRACTING + PROCESSING
+    queued: int = 0         # UPLOADED
+    retrying: int = 0
+    failed: int = 0
+    duplicate: int = 0
+
+
 class BatchItemOut(ORMModel):
     id: int
     tag_number: str
     description: str
     status: ItemStatus
     error_message: str | None = None
+    retry_count: int = 0
     images: list[ImageOut] = Field(default_factory=list)
     asset_tag: AssetTagOut | None = None
     is_duplicate: bool = False
@@ -78,6 +94,8 @@ class BatchOut(ORMModel):
     total_tags: int
     created_at: datetime
     items: list[BatchItemOut] = Field(default_factory=list)
+    tag_progress: ItemProgress = Field(default_factory=ItemProgress)
+    image_progress: ItemProgress = Field(default_factory=ItemProgress)
 
 
 class RejectedFile(BaseModel):

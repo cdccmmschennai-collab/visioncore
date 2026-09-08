@@ -14,6 +14,7 @@ const STAGE_INDEX: Record<ItemStatus, number> = {
   uploaded: 0,
   extracting: 1,
   processing: 2,
+  retrying: -1,
   completed: 3,
   failed: -1,
   duplicate: -1,
@@ -22,18 +23,28 @@ const STAGE_INDEX: Record<ItemStatus, number> = {
 interface Props {
   status: ItemStatus
   compact?: boolean
+  /** Shown while status is 'retrying' — how many automatic retries so far. */
+  retryCount?: number
 }
 
-export default function StatusRail({ status, compact = false }: Props) {
+export default function StatusRail({ status, compact = false, retryCount }: Props) {
   const failed = status === 'failed'
   const duplicate = status === 'duplicate'
+  const retrying = status === 'retrying'
   const active = STAGE_INDEX[status]
 
-  if (failed || duplicate) {
+  if (failed || duplicate || retrying) {
     return (
-      <div className={`rail rail-${failed ? 'failed' : 'duplicate'}`} role="status">
-        <span className="chip chip-danger" style={duplicate ? { color: 'var(--vc-verify)', borderColor: 'var(--vc-verify)', background: 'var(--vc-verify-wash)' } : undefined}>
-          {failed ? 'Failed' : 'Tag already extracted'}
+      <div className={`rail rail-${failed ? 'failed' : duplicate ? 'duplicate' : 'retrying'}`} role="status">
+        <span
+          className="chip chip-danger"
+          style={
+            failed
+              ? undefined
+              : { color: 'var(--vc-verify)', borderColor: 'var(--vc-verify)', background: 'var(--vc-verify-wash)' }
+          }
+        >
+          {failed ? 'Failed' : duplicate ? 'Tag already extracted' : `Retrying… (attempt ${retryCount ?? 1})`}
         </span>
       </div>
     )

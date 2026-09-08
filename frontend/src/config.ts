@@ -18,6 +18,9 @@ export const LIMITS = {
   // Batch Process (browser-scanned local folder) covers far more tags than
   // a normal drag-drop batch — see backend MAX_TAGS_PER_BATCH_PROCESS.
   maxTagsPerBatchProcess: 100,
+  // Purely presentational grouping for the progress display ("Batch 2 of
+  // 4") — mirrors backend BATCH_PROGRESS_CHUNK_SIZE. Not a processing unit.
+  batchProgressChunkSize: 25,
 }
 
 export const ACCEPTED_EXTENSIONS = ['.jpg', '.jpeg', '.jfif', '.png', '.webp', '.gif', '.bmp']

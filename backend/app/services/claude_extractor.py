@@ -38,7 +38,19 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 class ExtractionError(RuntimeError):
-    """Raised when extraction could not produce a usable payload."""
+    """Raised when extraction could not produce a usable payload.
+
+    `retryable` distinguishes a transient failure (rate limit, timeout,
+    connection drop, 5xx) worth an automatic retry from a permanent one (bad
+    request, corrupt image, unparseable response) that never will succeed no
+    matter how many times it's retried. Defaults to False so every existing
+    raise site (bad JSON, no images supplied) stays non-retryable unless
+    explicitly marked otherwise.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass
@@ -178,7 +190,9 @@ class ClaudeExtractor:
             raise ExtractionError(
                 "ANTHROPIC_API_KEY is not set. Add it to .env and restart the API."
             )
-        self._client = AsyncAnthropic(api_key=key, max_retries=2, timeout=120.0)
+        self._client = AsyncAnthropic(
+            api_key=key, max_retries=settings.claude_sdk_max_retries, timeout=120.0
+        )
         self._model = model or settings.claude_model
 
     async def extract(
@@ -218,13 +232,22 @@ class ClaudeExtractor:
             )
         except RateLimitError as exc:
             raise ExtractionError(
-                "Claude API rate limit reached. Wait a moment and retry this tag."
+                "Claude API rate limit reached. Wait a moment and retry this tag.",
+                retryable=True,
             ) from exc
-        except APIConnectionError as exc:
-            raise ExtractionError(f"Could not reach the Claude API: {exc}") from exc
+        except APIConnectionError as exc:      # includes APITimeoutError
+            raise ExtractionError(
+                f"Could not reach the Claude API: {exc}", retryable=True
+            ) from exc
         except APIStatusError as exc:
             detail = getattr(exc, "message", str(exc))
-            raise ExtractionError(f"Claude API error ({exc.status_code}): {detail}") from exc
+            # A 4xx is a bad request (malformed image, bad params) that will
+            # never succeed on retry; a 5xx/overload is the API's own
+            # transient trouble, worth retrying.
+            raise ExtractionError(
+                f"Claude API error ({exc.status_code}): {detail}",
+                retryable=exc.status_code >= 500,
+            ) from exc
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         text = "".join(

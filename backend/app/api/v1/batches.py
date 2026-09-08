@@ -31,6 +31,7 @@ from app.schemas.tag import (
     BatchOut,
     ExtractedImageOut,
     ImageOut,
+    ItemProgress,
     RejectedFile,
     SaveTagRequest,
     UploadResponse,
@@ -71,6 +72,7 @@ def _item_out(item: BatchItem) -> BatchItemOut:
         description=item.description,
         status=item.status,
         error_message=item.error_message,
+        retry_count=item.retry_count,
         images=[ImageOut.model_validate(i) for i in item.images],
         asset_tag=_asset_tag_out(item.asset_tag),
         is_duplicate=item.status == ItemStatus.DUPLICATE,
@@ -78,7 +80,39 @@ def _item_out(item: BatchItem) -> BatchItemOut:
     return out
 
 
+#: Buckets every ItemStatus into one of the progress counters below.
+_PROGRESS_BUCKET = {
+    ItemStatus.COMPLETED: "completed",
+    ItemStatus.EXTRACTING: "processing",
+    ItemStatus.PROCESSING: "processing",
+    ItemStatus.UPLOADED: "queued",
+    ItemStatus.RETRYING: "retrying",
+    ItemStatus.FAILED: "failed",
+    ItemStatus.DUPLICATE: "duplicate",
+}
+
+
+def _progress_counts(items: list[BatchItem]) -> tuple[ItemProgress, ItemProgress]:
+    """Tag-level and image-level progress, computed fresh from each item's
+    current status — no stored counters, so nothing to race under concurrent
+    workers. `batch.items` (and each item's `.images`) is already eagerly
+    loaded by every caller of this function, so this adds no new query.
+    """
+    tag = {"total": 0, "completed": 0, "processing": 0, "queued": 0,
+           "retrying": 0, "failed": 0, "duplicate": 0}
+    image = dict(tag)
+    for item in items:
+        bucket = _PROGRESS_BUCKET[item.status]
+        n_images = len(item.images)
+        tag["total"] += 1
+        tag[bucket] += 1
+        image["total"] += n_images
+        image[bucket] += n_images
+    return ItemProgress(**tag), ItemProgress(**image)
+
+
 def _batch_out(batch: Batch) -> BatchOut:
+    tag_progress, image_progress = _progress_counts(batch.items)
     return BatchOut(
         id=batch.id,
         reference=batch.reference,
@@ -87,6 +121,8 @@ def _batch_out(batch: Batch) -> BatchOut:
         total_tags=batch.total_tags,
         created_at=batch.created_at,
         items=[_item_out(i) for i in batch.items],
+        tag_progress=tag_progress,
+        image_progress=image_progress,
     )
 
 

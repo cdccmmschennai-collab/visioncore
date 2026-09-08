@@ -4,15 +4,19 @@ Runs as a FastAPI background task. Each tag gets its own database session and
 its own try/except, so one tag failing (an unreadable photo, a rate limit)
 leaves the rest of the batch to finish rather than taking the batch down.
 
-At this scale — ten tags per batch, one vision call each — background tasks are
-the right tool. Move to Celery or ARQ when you need retries that survive an API
-restart, or a worker pool separate from the web process.
+`process_batch` runs a batch's tags concurrently, up to
+`settings.extraction_max_concurrency` at once (see `_EXTRACTION_SEMAPHORE`
+below), with automatic exponential-backoff retry for transient failures
+(`ItemStatus.RETRYING`). `requeue_orphaned_items` picks back up anything left
+mid-extraction after a process restart. Move to Celery/ARQ only when you need
+a worker pool separate from the web process (see docs/ARCHITECTURE.md).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -46,6 +50,13 @@ from app.services.sync_client import fetch_missing_photo
 
 logger = logging.getLogger(__name__)
 
+# One process-wide cap on concurrent Claude calls, shared by every batch and
+# every retry — not one semaphore per batch. This is what keeps two users
+# uploading batches at the same moment from doubling the effective
+# concurrency, and what bounds how many pooled DB connections
+# (db/session.py: pool_size=10, max_overflow=20) extraction can hold at once.
+_EXTRACTION_SEMAPHORE = asyncio.Semaphore(settings.extraction_max_concurrency)
+
 
 async def _resolve_photo_paths(images: list) -> list[str]:
     """Re-anchor each photo onto this environment before extraction runs.
@@ -72,7 +83,8 @@ async def _resolve_photo_paths(images: list) -> list[str]:
     if missing:
         raise ExtractionError(
             "Photo file(s) not found on this server: " + ", ".join(missing)
-            + ". They may not have finished syncing from production yet — retry in a moment."
+            + ". They may not have finished syncing from production yet — retry in a moment.",
+            retryable=True,
         )
     return paths
 
@@ -182,23 +194,39 @@ async def process_item(item_id: int, user_id: int) -> None:
         photo_names = [img.original_filename for img in item.images]
 
         await _set_status(session, item, ItemStatus.EXTRACTING)
+        # Reset in case this is a manual re-extract of a previously-retried item.
+        item.retry_count = 0
+        await session.commit()
 
-        try:
-            photo_paths = await _resolve_photo_paths(item.images)
-            extractor = get_extractor()
-            result = await extractor.extract(photo_paths, item.tag_number, item.description)
-        except ExtractionError as exc:
-            logger.exception("Extraction failed for %s", item.tag_number)
-            session.add(ApiUsage(
-                user_id=user_id, tag_number=item.tag_number, model=settings.claude_model,
-                success=False, error_message=str(exc)[:2000],
-            ))
-            await _set_status(session, item, ItemStatus.FAILED, str(exc))
-            return
-        except Exception as exc:                      # noqa: BLE001 - last resort
-            logger.exception("Unexpected extraction error for %s", item.tag_number)
-            await _set_status(session, item, ItemStatus.FAILED, f"Unexpected error: {exc}")
-            return
+        attempt = 0
+        while True:
+            try:
+                photo_paths = await _resolve_photo_paths(item.images)
+                extractor = get_extractor()
+                result = await extractor.extract(photo_paths, item.tag_number, item.description)
+                break
+            except ExtractionError as exc:
+                attempt += 1
+                if not exc.retryable or attempt > settings.extraction_max_retries:
+                    logger.exception("Extraction failed for %s", item.tag_number)
+                    session.add(ApiUsage(
+                        user_id=user_id, tag_number=item.tag_number, model=settings.claude_model,
+                        success=False, error_message=str(exc)[:2000],
+                    ))
+                    await _set_status(session, item, ItemStatus.FAILED, str(exc))
+                    return
+                item.retry_count = attempt
+                delay = settings.extraction_retry_base_delay_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "Retrying extraction for %s (attempt %d/%d, waiting %.1fs): %s",
+                    item.tag_number, attempt, settings.extraction_max_retries, delay, exc,
+                )
+                await _set_status(session, item, ItemStatus.RETRYING, str(exc))
+                await asyncio.sleep(delay)
+            except Exception as exc:                      # noqa: BLE001 - last resort
+                logger.exception("Unexpected extraction error for %s", item.tag_number)
+                await _set_status(session, item, ItemStatus.FAILED, f"Unexpected error: {exc}")
+                return
 
         session.add(ApiUsage(
             user_id=user_id, tag_number=item.tag_number, model=result.model,
@@ -282,8 +310,15 @@ async def _rollup_batch_status(batch_id: int) -> None:
         await session.commit()
 
 
+async def _process_item_bounded(item_id: int, user_id: int) -> None:
+    """process_item, but capped by the process-wide extraction semaphore."""
+    async with _EXTRACTION_SEMAPHORE:
+        await process_item(item_id, user_id)
+
+
 async def process_batch(batch_id: int, user_id: int) -> None:
-    """Run every pending tag in a batch, then roll the batch status up."""
+    """Run every pending tag in a batch — up to EXTRACTION_MAX_CONCURRENCY at
+    once, globally, not one-at-a-time — then roll the batch status up."""
     async with AsyncSessionLocal() as session:
         batch = await session.scalar(
             select(Batch).options(selectinload(Batch.items)).where(Batch.id == batch_id)
@@ -294,8 +329,16 @@ async def process_batch(batch_id: int, user_id: int) -> None:
         item_ids = [i.id for i in batch.items if i.status == ItemStatus.UPLOADED]
         await session.commit()
 
-    for item_id in item_ids:
-        await process_item(item_id, user_id)
+    # return_exceptions=True: process_item already never raises by design,
+    # but a bug in one item's path must not cancel its siblings or skip the
+    # rollup below — that's what a plain gather() would do on first exception.
+    results = await asyncio.gather(
+        *(_process_item_bounded(item_id, user_id) for item_id in item_ids),
+        return_exceptions=True,
+    )
+    for item_id, result in zip(item_ids, results):
+        if isinstance(result, Exception):
+            logger.error("process_item(%s) raised unexpectedly", item_id, exc_info=result)
 
     await _rollup_batch_status(batch_id)
 
@@ -308,5 +351,52 @@ async def reextract_item(item_id: int, batch_id: int, user_id: int) -> None:
     batch rows and cannot produce a duplicate. It's process_item plus a batch
     status refresh, nothing more.
     """
-    await process_item(item_id, user_id)
+    await _process_item_bounded(item_id, user_id)
     await _rollup_batch_status(batch_id)
+
+
+_ORPHANABLE_STATUSES = (ItemStatus.EXTRACTING, ItemStatus.PROCESSING, ItemStatus.RETRYING)
+
+
+async def requeue_orphaned_items() -> None:
+    """Called once at startup (see app/main.py's lifespan).
+
+    This app runs as exactly one process — a single uvicorn process, no
+    `--workers`, one `backend` container/no replicas (see backend/Dockerfile,
+    docker-compose.yml) — so any item left in a non-terminal, in-flight status
+    (EXTRACTING/PROCESSING/RETRYING) can only be there because *this exact
+    process's previous life* died mid-item. There is no other live worker
+    that could still "own" it. Reset it to UPLOADED and let the normal
+    process_batch path pick it back up.
+
+    NOTE: this reasoning breaks if the app is ever horizontally scaled to
+    more than one replica against the same database — a second replica's
+    in-flight item would look identical to an orphan to a restarting first
+    replica. Do not scale to multiple replicas without adding a real
+    lease/claim column first.
+    """
+    orphaned_batches: dict[int, int] = {}
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(BatchItem.id, BatchItem.batch_id, Batch.user_id)
+            .join(Batch, Batch.id == BatchItem.batch_id)
+            .where(BatchItem.status.in_(_ORPHANABLE_STATUSES))
+        )).all()
+        if not rows:
+            return
+        item_ids = [r.id for r in rows]
+        await session.execute(
+            update(BatchItem)
+            .where(BatchItem.id.in_(item_ids))
+            .values(status=ItemStatus.UPLOADED, error_message=None, retry_count=0)
+        )
+        await session.commit()
+        for _item_id, batch_id, user_id in rows:
+            orphaned_batches.setdefault(batch_id, user_id)
+
+    logger.warning(
+        "Requeued %d orphaned batch item(s) from a previous run across %d batch(es)",
+        len(item_ids), len(orphaned_batches),
+    )
+    for batch_id, user_id in orphaned_batches.items():
+        asyncio.create_task(process_batch(batch_id, user_id))

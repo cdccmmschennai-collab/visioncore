@@ -15,6 +15,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.seed import seed_users
 from app.db.session import AsyncSessionLocal, engine
+from app.services.pipeline import requeue_orphaned_items
 from app.services.storage import storage_root
 from app.services.sync_client import run_sync_loop
 
@@ -43,6 +44,11 @@ async def lifespan(app: FastAPI):
     # Only the local/mirror side sets SYNC_SOURCE_URL \u2014 production leaves it
     # blank and never starts this task.
     sync_task = asyncio.create_task(run_sync_loop()) if settings.sync_source_url else None
+
+    # Anything left mid-extraction from a previous run of this process is an
+    # orphan by definition (single-process app) \u2014 pick it back up now rather
+    # than leaving it stuck forever in the UI.
+    asyncio.create_task(requeue_orphaned_items())
 
     logger.info("Visioncore API ready")
     yield

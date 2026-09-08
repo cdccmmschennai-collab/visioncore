@@ -31,15 +31,27 @@ Browser                    FastAPI                   Background task        Clau
 
 ## Why background tasks, not Celery
 
-At the stated scale — ten tags per batch, one vision call each, a handful of
-concurrent users — FastAPI background tasks are the right tool. They add no
-broker, no worker image, and no deployment surface.
+FastAPI background tasks are still the right tool: they add no broker, no
+worker image, and no deployment surface. Within that one background task,
+`process_batch` now runs a **semaphore-bounded concurrent pool** over a
+batch's tags (`EXTRACTION_MAX_CONCURRENCY`, default 4) instead of one Claude
+call at a time — the batch-process folder-scan flow can cover hundreds of
+tags in one run, and processing them one-by-one no longer scaled. A
+transient failure (rate limit, timeout, connection drop, 5xx) is retried
+in place with exponential backoff (`EXTRACTION_MAX_RETRIES`,
+`EXTRACTION_RETRY_BASE_DELAY_SECONDS`) and surfaces as `ItemStatus.RETRYING`
+while it does; a permanent failure (bad request, corrupt image) fails
+immediately. If the process restarts mid-batch, any item left in a
+non-terminal state is detected as orphaned at startup and automatically
+requeued (`app.services.pipeline.requeue_orphaned_items`) — safe because this
+app runs as exactly one process with no replicas.
 
-Move to Celery or ARQ when you need any of: retries that survive an API restart,
-a worker pool sized independently of the web process, scheduled re-processing,
-or visibility into a queue depth. The pipeline is already written as
-`process_item(item_id, user_id)` taking only primitives, so the move is a
-decorator and a broker URL rather than a rewrite.
+Move to Celery or ARQ when you need *cross-process* scaling: a worker pool
+sized independently of the web process, or multiple replicas sharing one
+queue (the single-process assumption behind the orphan-requeue logic above
+would need a real lease/claim column first). The pipeline is already written
+as `process_item(item_id, user_id)` taking only primitives, so that move is
+still a decorator and a broker URL rather than a rewrite.
 
 ## Duplicate protection
 
@@ -108,7 +120,7 @@ crafted tag number cannot escape via `../`.
 
 | Concern | Now | Next step |
 |---|---|---|
-| Extraction | Background tasks | Celery/ARQ with retry + DLQ |
+| Extraction | Background task, in-process concurrent pool + retry | Celery/ARQ for cross-process/multi-replica scaling |
 | File storage | Docker volume | S3/Azure Blob behind a storage interface |
 | Status updates | 2.5s polling | Server-Sent Events or WebSocket |
 | Sessions | Stateless JWT | Add a revocation list if you need forced logout |

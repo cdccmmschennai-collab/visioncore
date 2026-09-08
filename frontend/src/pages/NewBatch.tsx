@@ -31,6 +31,7 @@ const STAGE_FRACTION: Record<ItemStatus, number> = {
   uploaded: 0,
   extracting: 1 / 3,
   processing: 2 / 3,
+  retrying: 1 / 3,   // still in the extracting phase, just backing off before another attempt
   completed: 1,
   failed: 1,
   duplicate: 1,
@@ -281,7 +282,7 @@ export default function NewBatch() {
             if (prev.size === 0) return prev
             const stillActive = new Set(
               fresh.items
-                .filter((item) => item.status === 'uploaded' || item.status === 'extracting' || item.status === 'processing')
+                .filter((item) => item.status === 'uploaded' || item.status === 'extracting' || item.status === 'processing' || item.status === 'retrying')
                 .map((item) => item.id),
             )
             const next = new Set([...prev].filter((id) => stillActive.has(id)))
@@ -687,6 +688,33 @@ export default function NewBatch() {
             </span>
           </div>
 
+          {(() => {
+            const tp = batch.tag_progress
+            const ip = batch.image_progress
+            const chunkSize = LIMITS.batchProgressChunkSize
+            const totalChunks = Math.max(1, Math.ceil(batch.total_tags / chunkSize))
+            const showBreakdown = tp && (tp.retrying > 0 || tp.processing > 1 || tp.queued > 0)
+            const showChunks = totalChunks > 1
+            if (!showBreakdown && !showChunks) return null
+            return (
+              <div className="row gap-12 wrap">
+                {showBreakdown && (
+                  <span className="muted">
+                    {tp.queued} queued · {tp.processing} processing
+                    {tp.retrying > 0 ? ` · ${tp.retrying} retrying` : ''}
+                    {tp.failed > 0 ? ` · ${tp.failed} failed` : ''}
+                    {' · '}{ip.completed}/{ip.total} image{ip.total === 1 ? '' : 's'} done
+                  </span>
+                )}
+                {showChunks && (
+                  <span className="muted">
+                    Batch {Math.min(totalChunks, Math.floor(finishedCount / chunkSize) + 1)} of {totalChunks}
+                  </span>
+                )}
+              </div>
+            )
+          })()}
+
           <div className="stack gap-12">
             {batch.items.map((item) => (
               <div key={item.id} className="card progress-row">
@@ -715,7 +743,7 @@ export default function NewBatch() {
                   )}
                 </div>
 
-                <StatusRail status={item.status} />
+                <StatusRail status={item.status} retryCount={item.retry_count} />
 
                 {item.status === 'duplicate' && (
                   <div className="alert alert-warn">
