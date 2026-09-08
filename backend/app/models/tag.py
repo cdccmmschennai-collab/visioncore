@@ -12,6 +12,7 @@ class ItemStatus(str, enum.Enum):
     UPLOADED = "uploaded"
     EXTRACTING = "extracting"
     PROCESSING = "processing"
+    RETRYING = "retrying"      # a transient failure is being retried; not terminal
     COMPLETED = "completed"
     FAILED = "failed"
     DUPLICATE = "duplicate"
@@ -71,6 +72,9 @@ class BatchItem(Base, TimestampMixin):
         nullable=False,
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Count of automatic transient-failure retries attempted so far for the
+    # current extraction run — see app/services/pipeline.py's retry loop.
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
     batch = relationship("Batch", back_populates="items")
     asset_tag = relationship("AssetTag", back_populates="items")

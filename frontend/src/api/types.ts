@@ -1,7 +1,7 @@
 export type Role = 'admin' | 'user'
 export type Quality = 'Confirmed' | 'Verify'
 export type ItemStatus =
-  | 'uploaded' | 'extracting' | 'processing' | 'completed' | 'failed' | 'duplicate'
+  | 'uploaded' | 'extracting' | 'processing' | 'retrying' | 'completed' | 'failed' | 'duplicate'
 export type BatchStatus = 'uploaded' | 'processing' | 'completed' | 'failed' | 'partial'
 
 export interface User {
@@ -57,12 +57,26 @@ export interface TagImage {
   size_bytes: number
 }
 
+/** Live status-bucket counts for a batch's tags or images — safe to poll,
+ * since the backend recomputes it fresh from current item statuses on every
+ * request rather than tracking a mutable counter. */
+export interface ItemProgress {
+  total: number
+  completed: number
+  processing: number
+  queued: number
+  retrying: number
+  failed: number
+  duplicate: number
+}
+
 export interface BatchItem {
   id: number
   tag_number: string
   description: string
   status: ItemStatus
   error_message: string | null
+  retry_count: number
   images: TagImage[]
   asset_tag: AssetTag | null
   is_duplicate: boolean
@@ -76,6 +90,8 @@ export interface Batch {
   total_tags: number
   created_at: string
   items: BatchItem[]
+  tag_progress: ItemProgress
+  image_progress: ItemProgress
 }
 
 export interface ExtractedImage {

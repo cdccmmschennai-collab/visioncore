@@ -65,6 +65,34 @@ class Settings(BaseSettings):
     max_images_per_tag: int = Field(5, alias="MAX_IMAGES_PER_TAG")
     max_image_size_mb: int = Field(15, alias="MAX_IMAGE_SIZE_MB")
 
+    # ── Concurrent batch processing ─────────────────────────────────────────
+    # How many tags can be mid-extraction (a live Claude call) at once, across
+    # the WHOLE process — not per batch. A single module-level semaphore in
+    # app/services/pipeline.py enforces this, so two users' batches running at
+    # the same time still share this one ceiling. Keep this comfortably below
+    # db/session.py's pool_size + max_overflow (30): each in-flight extraction
+    # holds one pooled connection for the whole call, plus the app still
+    # needs headroom for ordinary request traffic (auth, polling).
+    extraction_max_concurrency: int = Field(4, alias="EXTRACTION_MAX_CONCURRENCY")
+
+    # Transient-failure retry (rate limit / timeout / connection / 5xx only —
+    # see ExtractionError.retryable in claude_extractor.py). A 4xx or
+    # malformed-response failure is never retried, regardless of this setting.
+    extraction_max_retries: int = Field(3, alias="EXTRACTION_MAX_RETRIES")
+    extraction_retry_base_delay_seconds: float = Field(2.0, alias="EXTRACTION_RETRY_BASE_DELAY_SECONDS")
+
+    # The Anthropic SDK has its own internal retry-with-backoff for the same
+    # class of transient errors. Our outer retry loop above now owns retry
+    # policy (and writes ItemStatus.RETRYING so it's visible), so this is left
+    # at 0 by default — otherwise a single outer attempt could silently retry
+    # again inside the SDK, multiplying total attempts and worst-case delay.
+    claude_sdk_max_retries: int = Field(0, alias="CLAUDE_SDK_MAX_RETRIES")
+
+    # Purely presentational grouping for the progress display ("Batch 2 of
+    # 4") — items are never queued or throttled in chunks; concurrency is
+    # governed solely by extraction_max_concurrency above.
+    batch_progress_chunk_size: int = Field(25, alias="BATCH_PROGRESS_CHUNK_SIZE")
+
     # ── Batch Process (browser-driven folder scan) ──────────────────────────
     # The "Batch Process" button on the New Batch page reads/writes a local
     # folder directly from the browser (File System Access API) rather than
