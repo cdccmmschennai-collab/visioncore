@@ -132,6 +132,35 @@ export default function History() {
     }
   }
 
+  // Date-wise download. A single-day download is just fromDate === toDate —
+  // if the user only fills in one of the two fields, the other is filled in
+  // to match right before the request goes out.
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
+  const [downloadingByDate, setDownloadingByDate] = useState(false)
+  const downloadByDate = async () => {
+    if (!fromDate && !toDate) {
+      toast.warn('Pick a From Date (and, for a range, a To Date) before downloading.')
+      return
+    }
+    const from = fromDate || toDate
+    const to = toDate || fromDate
+    if (from > to) {
+      toast.warn('From Date must be on or before To Date.')
+      return
+    }
+    setDownloadingByDate(true)
+    try {
+      const name = await api.downloadTemplatesByDate(from, to)
+      toast.success(`Downloaded ${name}`)
+      void load()
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Download failed.')
+    } finally {
+      setDownloadingByDate(false)
+    }
+  }
+
   const [downloadingAll, setDownloadingAll] = useState(false)
   const downloadAll = async () => {
     setDownloadingAll(true)
@@ -220,7 +249,7 @@ export default function History() {
           />
           <button
             type="button"
-            className="btn btn-sm"
+            className="btn btn-sm btn-primary"
             disabled={downloadingSelected}
             onClick={() => void downloadSelected()}
           >
@@ -233,6 +262,38 @@ export default function History() {
             onClick={() => void downloadAll()}
           >
             {downloadingAll ? 'Downloading…' : 'Download All (Template)'}
+          </button>
+        </div>
+        <div className="row gap-8 wrap" style={{ alignItems: 'flex-end' }}>
+          <label className="stack gap-2" style={{ fontSize: 12 }}>
+            From Date
+            <input
+              type="date"
+              className="input"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(event) => setFromDate(event.target.value)}
+              aria-label="From date"
+            />
+          </label>
+          <label className="stack gap-2" style={{ fontSize: 12 }}>
+            To Date
+            <input
+              type="date"
+              className="input"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(event) => setToDate(event.target.value)}
+              aria-label="To date"
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={downloadingByDate}
+            onClick={() => void downloadByDate()}
+          >
+            {downloadingByDate ? 'Downloading…' : 'Download by Date (Template)'}
           </button>
         </div>
       </header>

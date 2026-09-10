@@ -27,7 +27,13 @@ from anthropic import (
 )
 
 from app.core.config import settings
-from app.services.fields import FIELDS, NOT_PRESENT, normalise_payload, reconcile_tag_number
+from app.services.fields import (
+    FIELDS,
+    NOT_PRESENT,
+    normalise_payload,
+    reconcile_description,
+    reconcile_tag_number,
+)
 from app.services.image_optimizer import ALLOWED_MEDIA_TYPES, prepare_images_for_claude
 
 logger = logging.getLogger(__name__)
@@ -140,6 +146,13 @@ not a digits-only reading of it.
 rating, or schedule printed immediately alongside it, as one value — e.g. a \
 plate reading 3/4" 150RF becomes size_dimension = "3/4\" 150RF". Never split \
 them, and never move the class/rating half into additional_information.
+13. "description": the plain equipment/item name — e.g. "BALL VALVE", "GATE \
+VALVE", "GLOBE VALVE", "BUTTERFLY VALVE", "PUMP", "MOTOR", "COMPRESSOR", \
+"PRESSURE GAUGE" — never a full nameplate transcription. Identify it from \
+what type of item is visibly photographed, using any type name printed on \
+the plate as confirmation. quality = "Confirmed" only when the equipment \
+type is unambiguous from the photo or a printed label; "Verify" if you are \
+inferring it from limited visual cues.
 
 Before returning the JSON, validate: size_dimension includes its class/rating; \
 no dedicated field's value is repeated in additional_information; and \
@@ -217,18 +230,26 @@ class ClaudeExtractor:
             content.append(_image_block(optimized))
             payload_bytes += optimized.final_bytes
 
+        registered_as = f"tag number {tag_number} ({description})" if description else f"tag number {tag_number}"
+        description_instruction = (
+            "" if description else (
+                " The register has no equipment description for this tag yet — "
+                "determine \"description\" yourself from the photo(s), per rule 13.\n"
+            )
+        )
         content.append({
             "type": "text",
             "text": (
                 f"These photographs show a nameplate. For reference only, the "
-                f"batch register currently files these photos under tag number "
-                f"{tag_number} ({description}) — you do not need to match it.\n"
+                f"batch register currently files these photos under {registered_as} "
+                f"— you do not need to match it.\n"
                 f"Read \"tag_number\" independently, straight off the physical "
                 f"plate in the photo(s), the same way you read every other "
                 f"field. Quality \"Confirmed\" only if it's clearly legible; "
                 f"\"Verify\" if uncertain or damaged. If no tag number is "
                 f"printed on the plate at all, set value to exactly "
-                f"\"{NOT_PRESENT}\" and quality \"Verify\".\n\n"
+                f"\"{NOT_PRESENT}\" and quality \"Verify\".\n"
+                f"{description_instruction}\n"
                 f"Return the JSON object now."
             ),
         })
@@ -293,8 +314,12 @@ class ClaudeExtractor:
             raise ExtractionError("Claude returned an empty response", retryable=True)
 
         raw = _parse_json(text)
-        final_tag_number = reconcile_tag_number(raw, tag_number)
-        payload = normalise_payload(raw, final_tag_number, description)
+        final_tag_number, tag_number_quality = reconcile_tag_number(raw, tag_number)
+        final_description, description_quality = reconcile_description(raw, description)
+        payload = normalise_payload(
+            raw, final_tag_number, final_description,
+            tag_number_quality=tag_number_quality, description_quality=description_quality,
+        )
 
         return ExtractionResult(
             payload=payload,

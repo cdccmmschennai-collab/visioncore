@@ -120,3 +120,103 @@ def test_extract_raises_retryable_on_whitespace_only_response(tmp_path):
         assert False, "expected ExtractionError"
     except ExtractionError as exc:
         assert exc.retryable is True
+
+
+def test_extract_fills_in_description_from_claude_for_tag_only_upload(tmp_path):
+    """A tag-only upload (empty description) must pick up Claude's own read
+    of the equipment type, flagged Verify since a human hasn't confirmed it."""
+    extractor = ClaudeExtractor(api_key="sk-test-dummy")
+    photos = [str(_make_photo(tmp_path))]
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured["content"] = kwargs["messages"][0]["content"]
+        payload = (
+            '{"fields": {"description": {"value": "BALL VALVE", "quality": "Verify"}}, '
+            '"remarks": "", "photo_status": "EASY", "qc_comment": ""}'
+        )
+        return _fake_response(payload)
+
+    extractor._client.messages.create = fake_create
+
+    result = asyncio.run(extractor.extract(photos, "22-4202-TW-0019", ""))
+
+    assert result.payload["fields"]["description"]["value"] == "BALL VALVE"
+    assert result.payload["fields"]["description"]["quality"] == "Verify"
+    prompt_text = next(b["text"] for b in captured["content"] if b["type"] == "text" and "register" in b["text"])
+    assert "determine \"description\" yourself" in prompt_text
+
+
+def test_extract_flags_unresolved_when_claude_has_no_description_either(tmp_path):
+    extractor = ClaudeExtractor(api_key="sk-test-dummy")
+    photos = [str(_make_photo(tmp_path))]
+
+    async def fake_create(**kwargs):
+        payload = '{"fields": {}, "remarks": "", "photo_status": "EASY", "qc_comment": ""}'
+        return _fake_response(payload)
+
+    extractor._client.messages.create = fake_create
+
+    result = asyncio.run(extractor.extract(photos, "22-4202-TW-0019", ""))
+
+    assert result.payload["fields"]["description"]["value"] == "UNVERIFIED - CONFIRM EQUIPMENT DESCRIPTION"
+    assert result.payload["fields"]["description"]["quality"] == "Verify"
+
+
+def test_extract_confirms_tag_number_when_plate_reading_agrees_or_is_absent(tmp_path):
+    """No independent plate reading, or one that just confirms the filename,
+    must leave tag_number Confirmed — no doubt to flag."""
+    extractor = ClaudeExtractor(api_key="sk-test-dummy")
+    photos = [str(_make_photo(tmp_path))]
+
+    async def fake_create(**kwargs):
+        payload = '{"fields": {}, "remarks": "", "photo_status": "EASY", "qc_comment": ""}'
+        return _fake_response(payload)
+
+    extractor._client.messages.create = fake_create
+
+    result = asyncio.run(extractor.extract(photos, "12-TAG-0001", "TEST VALVE"))
+    assert result.payload["fields"]["tag_number"]["value"] == "12-TAG-0001"
+    assert result.payload["fields"]["tag_number"]["quality"] == "Confirmed"
+
+
+def test_extract_flags_tag_number_for_verification_on_mismatch(tmp_path):
+    """Claude's own plate reading disagreeing with the filename is a real
+    doubt — the plate reading wins, but must be marked Verify, not Confirmed."""
+    extractor = ClaudeExtractor(api_key="sk-test-dummy")
+    photos = [str(_make_photo(tmp_path))]
+
+    async def fake_create(**kwargs):
+        payload = (
+            '{"fields": {"tag_number": {"value": "12-TAG-9999", "quality": "Confirmed"}}, '
+            '"remarks": "", "photo_status": "EASY", "qc_comment": ""}'
+        )
+        return _fake_response(payload)
+
+    extractor._client.messages.create = fake_create
+
+    result = asyncio.run(extractor.extract(photos, "12-TAG-0001", "TEST VALVE"))
+    assert result.payload["fields"]["tag_number"]["value"] == "12-TAG-9999"
+    assert result.payload["fields"]["tag_number"]["quality"] == "Verify"
+
+
+def test_extract_never_lets_claude_override_an_explicit_description(tmp_path):
+    """A description the upload already supplied must win even if Claude's
+    own read of the equipment disagrees — only a missing description is
+    ever filled in from the photo."""
+    extractor = ClaudeExtractor(api_key="sk-test-dummy")
+    photos = [str(_make_photo(tmp_path))]
+
+    async def fake_create(**kwargs):
+        payload = (
+            '{"fields": {"description": {"value": "GATE VALVE", "quality": "Confirmed"}}, '
+            '"remarks": "", "photo_status": "EASY", "qc_comment": ""}'
+        )
+        return _fake_response(payload)
+
+    extractor._client.messages.create = fake_create
+
+    result = asyncio.run(extractor.extract(photos, "12-TAG-0001", "BALL VALVE"))
+
+    assert result.payload["fields"]["description"]["value"] == "BALL VALVE"
+    assert result.payload["fields"]["description"]["quality"] == "Confirmed"

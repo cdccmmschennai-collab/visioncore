@@ -39,9 +39,11 @@ from app.schemas.tag import (
 from app.services.batch_ingest import create_batch_with_items
 from app.services.claude_extractor import ALLOWED_MEDIA_TYPES
 from app.services.download_links import verify_photo_token
+from app.services.equipment_codes import resolve_description
 from app.services.fields import normalise_payload
 from app.services.filename_parser import (
     SUPPORTED_EXTENSIONS,
+    ParsedName,
     excel_basename,
     parse_filename,
     parse_folder_name,
@@ -143,7 +145,7 @@ async def _load_batch(db, batch_id: int, user) -> Batch:
 
 
 async def _group_uploads(
-    files: list[UploadFile], folders: list[str] | None
+    db, files: list[UploadFile], folders: list[str] | None
 ) -> tuple[OrderedDict[str, dict], list[RejectedFile]]:
     """Read and group an uploaded file list by tag, exactly the way a Batch
     Process browser folder scan or a Dropzone folder upload lays them out.
@@ -179,6 +181,20 @@ async def _group_uploads(
             continue
 
         parsed = parse_folder_name(folder) if folder else parse_filename(upload_file.filename or "")
+        if not parsed.ok and parsed.tag_only_candidate:
+            # No description segment and no code this parser already knows —
+            # one more attempt against every previously extracted tag's
+            # accepted description before giving up (see equipment_codes.py).
+            learned = await resolve_description(db, parsed.tag_only_candidate)
+            if learned:
+                parsed = ParsedName(parsed.tag_only_candidate, learned, True)
+            else:
+                # Still no description — accept the tag number on its own
+                # anyway. Claude reads the equipment type straight off the
+                # nameplate photo(s) during extraction instead of the file
+                # being turned away for lack of a description (see
+                # claude_extractor.reconcile_description).
+                parsed = ParsedName(parsed.tag_only_candidate, "", True)
         if not parsed.ok:
             rejected.append(RejectedFile(filename=upload_file.filename or "(unnamed)",
                                          reason=parsed.reason))
@@ -233,7 +249,7 @@ async def upload(
             f"You selected {len(files)}.",
         )
 
-    grouped, rejected = await _group_uploads(files, folders)
+    grouped, rejected = await _group_uploads(db, files, folders)
 
     if len(grouped) > settings.max_tags_per_batch:
         raise HTTPException(
@@ -305,7 +321,7 @@ async def batch_process(
                 "That Batch Process run no longer exists. Start Batch Process again.",
             )
 
-    grouped, rejected = await _group_uploads(files, folders)
+    grouped, rejected = await _group_uploads(db, files, folders)
 
     already_queued = existing_batch.total_tags if existing_batch else 0
     if already_queued + len(grouped) > settings.max_tags_per_batch_process:

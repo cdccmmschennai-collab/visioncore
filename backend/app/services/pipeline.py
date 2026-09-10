@@ -241,11 +241,15 @@ async def process_item(item_id: int, user_id: int) -> None:
         # and it disagrees (see claude_extractor.extract/reconcile_tag_number)
         # — this is the record's real identity from here on, not item.tag_number.
         final_tag_number = value_of(result.payload, "tag_number")
+        # Same idea for description: a tag-only upload leaves item.description
+        # blank, and claude_extractor's reconcile_description already filled
+        # this in from Claude's own read of the equipment in the photo(s).
+        final_description = value_of(result.payload, "description")
 
         # final_payload starts as a copy of the AI's answer; edits diverge it.
         asset_tag = AssetTag(
             tag_number=final_tag_number,
-            description=item.description,
+            description=final_description,
             ai_payload=result.payload,
             final_payload=result.payload,
             created_by_id=user_id,
@@ -283,7 +287,7 @@ async def process_item(item_id: int, user_id: int) -> None:
             # Must match asset_tag.tag_number, not item.tag_number — History's
             # query joins AssetTag.tag_number == Activity.tag_number to resolve
             # this row's tag, which breaks silently if they ever diverge.
-            tag_number=final_tag_number, description=item.description,
+            tag_number=final_tag_number, description=final_description,
             detail=f"Extracted from {len(photo_paths)} photo(s)",
             meta={"input_tokens": result.input_tokens,
                   "output_tokens": result.output_tokens,

@@ -244,6 +244,13 @@ export const api = {
     tagNumbers.forEach((tagNumber) => query.append('tag_numbers', tagNumber))
     return download(`/tags/download-all/template?${query}`, 'Selected-Tags-Template.xlsx')
   },
+  // History's date-wise download. `fromDate`/`toDate` are "YYYY-MM-DD" —
+  // pass the same value for both for a single-day download. A 404 (nothing
+  // extracted in that range) surfaces as an ApiError the caller can show.
+  downloadTemplatesByDate: (fromDate: string, toDate: string) => {
+    const query = new URLSearchParams({ from_date: fromDate, to_date: toDate })
+    return download(`/tags/download-all/template?${query}`, `Tags-${fromDate}-Template.xlsx`)
+  },
   // Same endpoints as downloadAi/downloadTemplate above, as raw bytes instead
   // of a browser download — used by src/services/localHelper.ts.
   fetchAiBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/ai`),

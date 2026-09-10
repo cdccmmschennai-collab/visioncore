@@ -21,6 +21,16 @@ export interface ParsedName {
   description: string
   ok: boolean
   reason?: string
+  /**
+   * True when `ok` was granted provisionally: no description was given and
+   * this tag's equipment code isn't in the small list this file knows
+   * about. The server checks it against every previously extracted tag's
+   * accepted description (see backend/app/services/equipment_codes.py) and
+   * is the one that actually decides — if it can't resolve it either, the
+   * upload response's `rejected` list reports it back, same as any other
+   * unreadable name.
+   */
+  pending?: boolean
 }
 
 /**
@@ -35,6 +45,37 @@ function looksLikeDescription(segment: string): boolean {
   const s = segment.trim()
   if (!s) return false
   return s.includes(' ') || s.includes(',') || s.includes('/')
+}
+
+// ISA-style equipment-code segments a tag number carries in place of a
+// written-out description (e.g. the "BV" in "22-4203-BV-0119"), mapped to
+// the plain equipment name to use as the description when no separate
+// description segment was supplied at all. Mirrors
+// backend/app/services/filename_parser.py's EQUIPMENT_CODE_DESCRIPTIONS —
+// keep the two in sync.
+const EQUIPMENT_CODE_DESCRIPTIONS: Record<string, string> = {
+  BV: 'BALL VALVE',
+  GV: 'GATE VALVE',
+  GLV: 'GLOBE VALVE',
+  BFV: 'BUTTERFLY VALVE',
+  PMP: 'PUMP',
+  MTR: 'MOTOR',
+  CMP: 'COMPRESSOR',
+  PG: 'PRESSURE GAUGE',
+}
+
+/**
+ * Find a known equipment-code segment among a tag's own segments. Used only
+ * as a last resort, when the tag carries no separate description segment at
+ * all, so a tag-only name like "22-4203-BV-0119.jpg" can still resolve to a
+ * description ("BALL VALVE") instead of failing outright.
+ */
+function equipmentCodeDescription(segments: string[]): string | null {
+  for (const segment of segments) {
+    const description = EQUIPMENT_CODE_DESCRIPTIONS[segment.trim().toUpperCase()]
+    if (description) return description
+  }
+  return null
 }
 
 function splitTagDescription(stem: string, example: string): ParsedName {
@@ -60,10 +101,21 @@ function splitTagDescription(stem: string, example: string): ParsedName {
   if (splitAt === -1 && /^[A-Za-z]+$/.test(segments[segments.length - 1])) {
     splitAt = segments.length - 1
   }
+  // Last resort: no description segment at all, e.g. "22-4203-BV-0119" —
+  // the whole stem is the tag number, and its embedded equipment code
+  // ("BV") supplies the description instead.
   if (splitAt === -1) {
+    const codeDescription = equipmentCodeDescription(segments)
+    if (codeDescription) {
+      return { tagNumber: segments.join('-').toUpperCase(), description: codeDescription, ok: true }
+    }
+    // Not one of the handful of codes this file knows about — don't block
+    // the upload over it. The server also checks every previously
+    // extracted tag's accepted description for this code (a much bigger,
+    // constantly-growing list than this static one), so let it have the
+    // final say instead of rejecting a tag it might actually recognize.
     return {
-      tagNumber: '', description: '', ok: false,
-      reason: "Couldn't tell where the tag number ends and the description begins",
+      tagNumber: segments.join('-').toUpperCase(), description: '', ok: true, pending: true,
     }
   }
 

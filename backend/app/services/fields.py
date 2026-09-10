@@ -76,15 +76,26 @@ def empty_payload(tag_number: str = "", description: str = "") -> dict:
     return payload
 
 
-def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
+def normalise_payload(
+    raw: dict,
+    tag_number: str,
+    description: str,
+    *,
+    tag_number_quality: str = QUALITY_CONFIRMED,
+    description_quality: str = QUALITY_CONFIRMED,
+) -> dict:
     """Coerce anything Claude returned into the exact shape the app expects.
 
     Defensive by design: a model response is untrusted input. Missing keys are
     filled, unknown keys dropped, and quality marks constrained to the two
-    legal values. `description` always comes from the filename. `tag_number`
-    is whatever the caller has already decided is final — the filename value,
-    or the AI's own plate reading when it disagrees (see
-    `reconcile_tag_number` below) — never re-derived here.
+    legal values. `tag_number`/`description` are whatever the caller has
+    already decided is final — the filename value, or the AI's own plate
+    reading when the filename didn't have one or disagreed with it (see
+    `reconcile_tag_number` and `reconcile_description` below) — never
+    re-derived here. Each `*_quality` should be "Confirmed" when that final
+    value stands unchallenged and "Verify" when there's any doubt about it
+    (a mismatch the AI had to resolve, or a value the AI had to supply
+    outright), so a reviewer knows exactly what to double check.
     """
     out = empty_payload(tag_number, description)
     raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
@@ -109,8 +120,14 @@ def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
         out["fields"][f.key] = {"value": value or NOT_PRESENT, "quality": quality}
 
     # The caller's tag_number/description win for identity fields.
-    out["fields"]["tag_number"] = {"value": tag_number, "quality": QUALITY_CONFIRMED}
-    out["fields"]["description"] = {"value": description, "quality": QUALITY_CONFIRMED}
+    out["fields"]["tag_number"] = {
+        "value": tag_number,
+        "quality": tag_number_quality if tag_number_quality in VALID_QUALITY else QUALITY_CONFIRMED,
+    }
+    out["fields"]["description"] = {
+        "value": description,
+        "quality": description_quality if description_quality in VALID_QUALITY else QUALITY_CONFIRMED,
+    }
 
     out["remarks"] = str(raw.get("remarks", "") or "").strip()
     out["photo_status"] = str(raw.get("photo_status", "") or "").strip()
@@ -118,20 +135,54 @@ def normalise_payload(raw: dict, tag_number: str, description: str) -> dict:
     return out
 
 
-def reconcile_tag_number(raw: dict, filename_tag_number: str) -> str:
+def reconcile_tag_number(raw: dict, filename_tag_number: str) -> tuple[str, str]:
     """Prefer the tag number actually printed on the nameplate over the one
     parsed from the filename — but only when the AI found one on the plate
     and it disagrees with the filename. No independent read (or one that
     just confirms the filename) changes nothing.
+
+    Returns (tag_number, quality), same criteria as `reconcile_description`:
+    "Confirmed" when the filename's tag number stands unchallenged (Claude
+    found nothing on the plate, or its reading agrees), "Verify" when
+    Claude's independent plate reading disagrees — one of the two is wrong,
+    so a reviewer needs to say which.
     """
     raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
     entry = raw_fields.get("tag_number")
     photo_value = str(entry.get("value", "") or "").strip() if isinstance(entry, dict) else ""
     if is_blank(photo_value):
-        return filename_tag_number
+        return filename_tag_number, QUALITY_CONFIRMED
     if photo_value.upper() == filename_tag_number.strip().upper():
-        return filename_tag_number
-    return photo_value.upper()
+        return filename_tag_number, QUALITY_CONFIRMED
+    return photo_value.upper(), QUALITY_VERIFY
+
+
+#: Set when neither the upload nor a known equipment code could supply a
+#: description and Claude's own read of the nameplate didn't either —
+#: distinct from NOT_PRESENT, which means "this field isn't printed on the
+#: plate", not "we don't know the equipment type at all".
+UNRESOLVED_DESCRIPTION = "UNVERIFIED - CONFIRM EQUIPMENT DESCRIPTION"
+
+
+def reconcile_description(raw: dict, upload_description: str) -> tuple[str, str]:
+    """Fill in a tag-only upload's description from Claude's own reading of
+    the equipment shown in the photo(s) — never overwrites an explicit,
+    human/filename-supplied description.
+
+    Returns (description, quality): "Confirmed" when the description came
+    from the upload itself (typed, or resolved from a known equipment
+    code), "Verify" when Claude had to determine it from the photo alone,
+    so a reviewer knows to double check it.
+    """
+    if not is_blank(upload_description):
+        return upload_description, QUALITY_CONFIRMED
+
+    raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
+    entry = raw_fields.get("description")
+    ai_value = str(entry.get("value", "") or "").strip() if isinstance(entry, dict) else ""
+    if is_blank(ai_value):
+        return UNRESOLVED_DESCRIPTION, QUALITY_VERIFY
+    return ai_value.upper(), QUALITY_VERIFY
 
 
 def value_of(payload: dict, key: str) -> str:
