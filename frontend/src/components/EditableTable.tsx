@@ -153,7 +153,8 @@ export default function EditableTable({
         <div className="alert alert-info" style={{ marginBottom: 16 }}>
           <span aria-hidden="true">i</span>
           <span>
-            Review and correct the data if needed, then click Save. Changed values are recorded separately from the AI's original answer and appear in blue in the Template workbook.          </span>
+            Review and correct the data if needed, then click Save. Changed values are recorded separately from the AI's original answer and appear in blue in the Template workbook. Changing the Tag Number renames this record everywhere — its upload history, photos and duplicate check move with it.
+          </span>
         </div>
       )}
 
@@ -171,9 +172,6 @@ export default function EditableTable({
               const field = source.fields?.[key] ?? emptyField()
               const isMissing = field.value === NOT_PRESENT
               const wasCorrected = corrected.has(key)
-              // Tag number and description come from the filename and are the
-              // record's identity — editing them here would orphan the files.
-              const locked = key === 'tag_number' || key === 'description'
 
               return (
                 <tr key={key}>
@@ -184,7 +182,7 @@ export default function EditableTable({
                     )}
                   </th>
                   <td>
-                    {editing && !locked ? (
+                    {editing ? (
                       multiline ? (
                         <textarea
                           className="textarea"
@@ -211,7 +209,7 @@ export default function EditableTable({
                     )}
                   </td>
                   <td>
-                    {editing && !locked ? (
+                    {editing ? (
                       <select
                         className="select"
                         value={field.quality}

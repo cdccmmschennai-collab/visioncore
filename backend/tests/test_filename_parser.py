@@ -55,6 +55,17 @@ from app.services.filename_parser import parse_filename, parse_folder_name
         ("PM-8981B MOTOR,PUMP.jpg", "PM-8981B", "MOTOR,PUMP"),
         ("PM-1234A VALVE.jpg", "PM-1234A", "VALVE"),
         ("P-1001 MOTOR.jpg", "P-1001", "MOTOR"),
+        # Tag number only, no description segment at all: the tag's own
+        # embedded equipment code ("BV") supplies the description.
+        ("12-4020-BV-0074.jpg", "12-4020-BV-0074", "BALL VALVE"),
+        ("22-4203-BV-0119.jpg", "22-4203-BV-0119", "BALL VALVE"),
+        ("22-4203-GV-0119.jpg", "22-4203-GV-0119", "GATE VALVE"),
+        ("22-4203-GLV-0119.jpg", "22-4203-GLV-0119", "GLOBE VALVE"),
+        ("22-4203-BFV-0119.jpg", "22-4203-BFV-0119", "BUTTERFLY VALVE"),
+        ("22-4203-PMP-0119.jpg", "22-4203-PMP-0119", "PUMP"),
+        ("22-4203-MTR-0119.jpg", "22-4203-MTR-0119", "MOTOR"),
+        ("22-4203-CMP-0119.jpg", "22-4203-CMP-0119", "COMPRESSOR"),
+        ("22-4203-PG-0119.jpg", "22-4203-PG-0119", "PRESSURE GAUGE"),
     ],
 )
 def test_parse_filename_valid(filename, tag_number, description):
@@ -68,7 +79,7 @@ def test_parse_filename_valid(filename, tag_number, description):
     "filename",
     [
         "BALLVALVE.jpg",            # no separator at all
-        "12-4020-BV-0074.jpg",      # no description
+        "12-4020-XY-0074.jpg",      # no description, unrecognized code
         "notes.txt",                # unsupported extension
         "12--0074-BALL VALVE.jpg",  # empty segment
         "",                         # empty filename
@@ -97,6 +108,13 @@ def test_parse_folder_name_space_separator():
     assert result.ok
     assert result.tag_number == "12-LJBF-1067"
     assert result.description == "FIRE AND GAS JUNCTION BOX"
+
+
+def test_parse_folder_name_tag_only_infers_description_from_equipment_code():
+    result = parse_folder_name("22-4203-BV-0119")
+    assert result.ok
+    assert result.tag_number == "22-4203-BV-0119"
+    assert result.description == "BALL VALVE"
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,7 @@ WEIGHT and COUNTRY.
 """
 from __future__ import annotations
 
+import re
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -75,6 +76,33 @@ COLUMN_WIDTHS: dict[str, float] = {
 
 WRAP_HEADERS = {"EQPT HAZARDOUS CLASSIFICATION", "ADDITIONAL INFORMATION", "REMARKS"}
 
+#: additional_information is stored (and shown everywhere else — the AI
+#: Output workbook, the UI, the database) as "LABEL: value" pairs joined by
+#: ", " per the extraction prompt's own rule 6 (see claude_extractor.py). A
+#: comma-space immediately followed by what reads as the *next* pair's own
+#: "LABEL:" marks that boundary; only that comma-space is broken onto a new
+#: line, so a comma that's just punctuation inside a value (not before a
+#: label) is left alone.
+_ADDITIONAL_INFO_PAIR_BREAK = re.compile(r",\s+(?=[A-Z0-9][A-Z0-9 /&\-]*:)")
+
+
+def _format_additional_information(value: str) -> str:
+    """Template workbook display only — one "LABEL: value" pair per Excel
+    line break within the same cell, instead of one dense comma-joined line.
+    The AI Output workbook, the database, and the app UI keep the original
+    comma-joined string untouched.
+    """
+    return _ADDITIONAL_INFO_PAIR_BREAK.sub("\n", value)
+
+
+def _format_size_dimension(value: str) -> str:
+    """Template workbook display only — the inch mark (") spelled out as
+    "inch" (`6"` -> "6 inch", `24" x 6"` -> "24 inch x 6 inch"), since a raw
+    `"` can render oddly once exported. The AI Output workbook, the
+    database, and the app UI keep the original `"` mark untouched.
+    """
+    return value.replace('"', " inch")
+
 
 def _write_asset_tags_header(ws: Worksheet) -> None:
     for col, header in enumerate(ASSET_TAG_HEADERS, start=1):
@@ -100,6 +128,10 @@ def _write_asset_tag_row(ws: Worksheet, row_idx: int, serial: int, record: dict)
     for field in FIELDS:
         value = value_of(payload, field.key)
         display = "" if is_blank(value) else value
+        if field.key == "additional_information" and display:
+            display = _format_additional_information(display)
+        elif field.key == "size_dimension" and display:
+            display = _format_size_dimension(display)
         cell = ws.cell(row=row_idx, column=col, value=display or None)
 
         # Force text format so Excel never renders "02" as the number 2.

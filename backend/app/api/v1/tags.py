@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.deps import AdminUser, CurrentUser, DbSession
@@ -14,7 +15,7 @@ from app.schemas.common import Message, Page
 from app.schemas.tag import AssetTagOut, SaveTagRequest, SearchResultOut
 from app.services.download_links import ai_excel_download_url, photo_view_url, verify_ai_excel_token
 from app.services.excel_template import build_template_workbook
-from app.services.fields import normalise_payload
+from app.services.fields import normalise_payload, quality_of, value_of
 from app.services.filename_parser import excel_basename, safe_filename
 from app.services.pipeline import generate_workbooks, template_path_columns
 from app.services.storage import remove_files, resolve_stored
@@ -212,6 +213,12 @@ async def download_all_templates(
     tag_numbers: list[str] | None = Query(
         None, description="Restrict the export to just these tag numbers; omit for every tag."
     ),
+    from_date: date | None = Query(
+        None, description="Only tags extracted on/after this date (History's date-range download)."
+    ),
+    to_date: date | None = Query(
+        None, description="Only tags extracted on/before this date (History's date-range download)."
+    ),
 ) -> Response:
     """One consolidated Template workbook, one row per unique asset tag.
 
@@ -224,18 +231,39 @@ async def download_all_templates(
     `tag_numbers` (History's per-tag checkboxes) narrows the same query rather
     than changing it, so the "download everything" call every existing caller
     already makes — no `tag_numbers` at all — is untouched.
+
+    `from_date`/`to_date` (History's date-wise download) filter by the tag's
+    own `created_at` — when it was extracted, since that's the moment an
+    AssetTag row (and so an exportable Template row) starts existing at all.
+    A single-day download is just `from_date == to_date`; both are inclusive
+    of the whole day.
     """
     query = select(AssetTag).order_by(AssetTag.tag_number)
     if user.role != UserRole.ADMIN:
         query = query.where(AssetTag.created_by_id == user.id)
     if tag_numbers:
         query = query.where(AssetTag.tag_number.in_(tag_numbers))
+    if from_date is not None:
+        query = query.where(
+            AssetTag.created_at >= datetime.combine(from_date, time.min, tzinfo=timezone.utc)
+        )
+    if to_date is not None:
+        query = query.where(
+            AssetTag.created_at
+            < datetime.combine(to_date, time.min, tzinfo=timezone.utc) + timedelta(days=1)
+        )
     tags = (await db.scalars(query)).all()
     if not tags:
-        detail = (
-            "None of the selected tags could be found." if tag_numbers
-            else "No extracted tags to export yet."
-        )
+        if from_date or to_date:
+            detail = (
+                f"No tags were extracted on {from_date}." if from_date == to_date
+                else f"No tags were extracted between {from_date or 'the beginning'} "
+                     f"and {to_date or 'now'}."
+            )
+        elif tag_numbers:
+            detail = "None of the selected tags could be found."
+        else:
+            detail = "No extracted tags to export yet."
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail)
 
     photo_rows = (
@@ -268,14 +296,24 @@ async def download_all_templates(
 
     content = build_template_workbook(records)
 
+    date_range = f"{from_date} to {to_date}" if (from_date or to_date) else ""
     db.add(Activity(
         user_id=user.id, action=ActivityAction.DOWNLOAD,
         detail=f"Downloaded consolidated Template workbook "
-               f"({len(tags)} {'selected ' if tag_numbers else ''}tag(s))",
+               f"({len(tags)} {'selected ' if tag_numbers else ''}tag(s)"
+               f"{f', {date_range}' if date_range else ''})",
     ))
     await db.commit()
 
-    filename = "Selected-Tags-Template.xlsx" if tag_numbers else "All-Tags-Template.xlsx"
+    if from_date or to_date:
+        filename = (
+            f"Tags-{from_date}-Template.xlsx" if from_date == to_date
+            else f"Tags-{from_date or 'start'}_to_{to_date or 'now'}-Template.xlsx"
+        )
+    elif tag_numbers:
+        filename = "Selected-Tags-Template.xlsx"
+    else:
+        filename = "All-Tags-Template.xlsx"
     return Response(
         content=content,
         media_type=XLSX_MEDIA,
@@ -307,11 +345,49 @@ async def save_tag(
     `ai_payload` is deliberately left untouched — the whole point of keeping it
     is that the Template sheet can colour a reviewer-supplied value blue by
     comparing the two.
+
+    Tag Number and Description are editable like any other field. Description
+    is just text — it flows straight into final_payload and the regenerated
+    workbook names below. Tag Number is this record's identity everywhere
+    else in the schema (BatchItem, Activity, photo links, duplicate check all
+    key off the string, not asset_tag_id), so a change here is a rename:
+    checked for a collision with another tag, then carried onto every
+    BatchItem and Activity row that pointed at the old number, so nothing
+    that already existed for this tag becomes unreachable under the new one.
     """
     tag = await _get_tag(db, tag_id)
 
+    raw_payload = body.payload.model_dump()
+    old_tag_number = tag.tag_number
+    new_tag_number = value_of(raw_payload, "tag_number").strip().upper() or old_tag_number
+    new_description = value_of(raw_payload, "description").strip() or tag.description
+
+    if new_tag_number != old_tag_number:
+        collision = await db.scalar(
+            select(AssetTag.id).where(AssetTag.tag_number == new_tag_number, AssetTag.id != tag.id)
+        )
+        if collision is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Tag number {new_tag_number} is already used by another record.",
+            )
+        await db.execute(
+            update(BatchItem)
+            .where(BatchItem.asset_tag_id == tag.id)
+            .values(tag_number=new_tag_number)
+        )
+        await db.execute(
+            update(Activity)
+            .where(Activity.tag_number == old_tag_number)
+            .values(tag_number=new_tag_number)
+        )
+        tag.tag_number = new_tag_number
+
+    tag.description = new_description
     tag.final_payload = normalise_payload(
-        body.payload.model_dump(), tag.tag_number, tag.description
+        raw_payload, new_tag_number, new_description,
+        tag_number_quality=quality_of(raw_payload, "tag_number"),
+        description_quality=quality_of(raw_payload, "description"),
     )
     tag.edited_by_id = user.id
     tag.revision += 1
@@ -326,7 +402,15 @@ async def save_tag(
     ).all()
     photo_names = [r[0] for r in photo_rows]
     photo_paths = [r[1] for r in photo_rows]
+    # Workbook filenames are built from tag_number + description (see
+    # excel_basename) — renaming either leaves the old-named files behind
+    # under the previous path unless they're cleaned up once the new ones
+    # are safely written.
+    stale_exports = [p for p in (tag.ai_excel_path, tag.template_excel_path) if p]
     await generate_workbooks(db, tag, photo_names or [f"{tag.tag_number}.jpg"], photo_paths)
+    stale_exports = [p for p in stale_exports if p not in (tag.ai_excel_path, tag.template_excel_path)]
+    if stale_exports:
+        remove_files(stale_exports)
 
     db.add(Activity(
         user_id=user.id, action=ActivityAction.EDIT,

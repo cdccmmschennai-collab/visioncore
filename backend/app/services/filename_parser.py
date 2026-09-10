@@ -38,6 +38,13 @@ class ParsedName:
     description: str
     ok: bool
     reason: str = ""
+    #: Set only when parsing failed for lack of any description segment or
+    #: recognized equipment code — the full stem, as it would read as a tag
+    #: number if a description is added. Lets a caller with access to
+    #: previously-extracted tags (see app/services/equipment_codes.py) make
+    #: one more attempt before giving up, without re-deriving this parser's
+    #: segment-splitting logic itself.
+    tag_only_candidate: str = ""
 
 
 def _clean(text: str) -> str:
@@ -70,6 +77,37 @@ def _looks_like_description(segment: str) -> bool:
 #: word, unlike a description word such as "MOTOR".
 _TAG_FRAGMENT = re.compile(r"\d+[A-Za-z]{0,2}$")
 
+#: ISA-style equipment-code segments a tag number carries in place of a
+#: written-out description (e.g. the "BV" in "22-4203-BV-0119"), mapped to
+#: the plain equipment name to use as the description when no separate
+#: description segment was supplied at all. Kept short and unambiguous —
+#: only add a code here when it reliably means one thing.
+EQUIPMENT_CODE_DESCRIPTIONS: dict[str, str] = {
+    "BV": "BALL VALVE",
+    "GV": "GATE VALVE",
+    "GLV": "GLOBE VALVE",
+    "BFV": "BUTTERFLY VALVE",
+    "PMP": "PUMP",
+    "MTR": "MOTOR",
+    "CMP": "COMPRESSOR",
+    "PG": "PRESSURE GAUGE",
+}
+
+
+def _equipment_code_description(segments: list[str]) -> str | None:
+    """Find a known equipment-code segment among a tag's own segments.
+
+    Used only as a last resort, when the tag carries no separate
+    description segment at all, so a tag-only name like
+    "22-4203-BV-0119.jpg" can still resolve to a description ("BALL VALVE")
+    instead of failing outright.
+    """
+    for segment in segments:
+        description = EQUIPMENT_CODE_DESCRIPTIONS.get(segment.strip().upper())
+        if description:
+            return description
+    return None
+
 
 def _split_tag_description(stem: str, *, example: str) -> ParsedName:
     """Shared `<TAG>-<DESCRIPTION>` split used for both filenames and folder names."""
@@ -96,10 +134,22 @@ def _split_tag_description(stem: str, *, example: str) -> ParsedName:
     if split_at is None and len(segments) >= 2 and segments[-1].isalpha():
         split_at = len(segments) - 1
 
+    # Last resort: no description segment at all, e.g. "22-4203-BV-0119" —
+    # the whole stem is the tag number, and its embedded equipment code
+    # ("BV") supplies the description instead.
     if split_at is None:
+        code_description = _equipment_code_description(segments)
+        if code_description is not None:
+            return ParsedName("-".join(segments).upper(), code_description, True)
+
+    if split_at is None:
+        candidate = "-".join(segments).upper()
         return ParsedName(
             "", "", False,
-            "Could not tell where the tag number ends and the description begins",
+            f"Tag '{candidate}' has no description and its equipment code isn't "
+            "recognized yet — add a description, or extract at least one other "
+            "tag with that code and a description first.",
+            tag_only_candidate=candidate,
         )
 
     # The segment that triggered the split may itself glue a trailing tag

@@ -50,13 +50,14 @@ const Dropzone = forwardRef<DropzoneHandle, Props>(function Dropzone(
 
   /** Group the selection by tag so the user sees what will be processed. */
   const groups = useMemo(() => {
-    const map = new Map<string, { description: string; files: StagedFile[]; valid: boolean; reason?: string; folder: string | null }>()
+    const map = new Map<string, { description: string; files: StagedFile[]; valid: boolean; pending?: boolean; reason?: string; folder: string | null }>()
     for (const staged of files) {
       const { key, parsed } = stagedGroup(staged)
       const group = map.get(key) ?? {
         description: parsed.description,
         files: [],
         valid: parsed.ok,
+        pending: parsed.pending,
         reason: parsed.reason,
         folder: staged.folder,
       }
@@ -228,7 +229,13 @@ const Dropzone = forwardRef<DropzoneHandle, Props>(function Dropzone(
                   {group.valid ? (
                     <>
                       <span className="tag-code">{key}</span>
-                      <span className="muted">{group.description}</span>
+                      {group.pending ? (
+                        <span className="chip chip-verify" title="No description given — checked against known equipment codes on upload">
+                          Equipment code checked on upload
+                        </span>
+                      ) : (
+                        <span className="muted">{group.description}</span>
+                      )}
                       {group.folder !== null && (
                         <span className="chip chip-neutral" title="Grouped from a subfolder">
                           📁 {group.folder}
