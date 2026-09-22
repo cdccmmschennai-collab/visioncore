@@ -4,11 +4,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Query
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import Integer, and_, cast, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.deps import CurrentUser, DbSession
-from app.models import Activity, ActivityAction, AssetTag, BatchItem, ItemStatus, User, UserRole
+from app.models import Activity, ActivityAction, AssetTag, Batch, BatchItem, ItemStatus, User, UserRole
 from app.schemas.common import Page
 from app.schemas.tag import HistoryRow
 
@@ -50,6 +50,22 @@ async def list_history(
     page_size: int = Query(25, ge=1, le=100),
 ) -> Page[HistoryRow]:
     completed_item = aliased(BatchItem)
+    # An Activity row has no foreign key to what it's about — only a
+    # tag_number string (for tag actions) or a batch id tucked inside `meta`
+    # (for UPLOAD) — precisely so the audit log used to survive that record
+    # being deleted later. The production History page must NOT do that: a
+    # row is only shown while the record it refers to still exists, so a
+    # direct-SQL (or app) deletion disappears from History on next refresh.
+    # upload_batch resolves UPLOAD's meta->>'batch_id' against a live Batch
+    # row; every other visible action is required to still resolve to a
+    # live AssetTag via the join below.
+    upload_batch = aliased(Batch)
+    upload_batch_id = cast(Activity.meta["batch_id"].astext, Integer)
+    record_exists = or_(
+        and_(Activity.action == ActivityAction.UPLOAD, upload_batch.id.is_not(None)),
+        and_(Activity.action != ActivityAction.UPLOAD, AssetTag.id.is_not(None)),
+    )
+
     query = (
         select(Activity, User.username, AssetTag.id,
                completed_item.batch_id, completed_item.id)
@@ -61,12 +77,15 @@ async def list_history(
                  completed_item.status == ItemStatus.COMPLETED),
             isouter=True,
         )
-        .where(Activity.action.in_(VISIBLE_ACTIONS))
+        .join(upload_batch, upload_batch.id == upload_batch_id, isouter=True)
+        .where(Activity.action.in_(VISIBLE_ACTIONS), record_exists)
     )
     count_query = (
         select(func.count())
         .select_from(Activity)
-        .where(Activity.action.in_(VISIBLE_ACTIONS))
+        .join(AssetTag, AssetTag.tag_number == Activity.tag_number, isouter=True)
+        .join(upload_batch, upload_batch.id == upload_batch_id, isouter=True)
+        .where(Activity.action.in_(VISIBLE_ACTIONS), record_exists)
     )
 
     # Non-admins only ever see their own rows, regardless of the flag.
