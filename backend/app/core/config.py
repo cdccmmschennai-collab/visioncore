@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # frontend. Leave blank and the dashboard reports itself unavailable
     # rather than showing any locally estimated figures.
     anthropic_admin_api_key: str = Field("", alias="ANTHROPIC_ADMIN_API_KEY")
+    # Encrypts per-team Claude API keys at rest (app/services/claude_config.py).
+    # Falls back to jwt_secret when unset so an existing install keeps working
+    # without a new required env var (see migration 0010's CHENNAI seed) —
+    # setting a dedicated secret is still recommended for a new deployment.
+    claude_key_encryption_secret: str = Field("", alias="CLAUDE_KEY_ENCRYPTION_SECRET")
     # ── Claude image optimization (temporary, in-memory copies only — see
     # app/services/image_optimizer.py) ─────────────────────────────────────
     # A photo at or under BOTH thresholds is sent to Claude completely

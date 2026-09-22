@@ -198,11 +198,17 @@ async def process_item(item_id: int, user_id: int) -> None:
         item.retry_count = 0
         await session.commit()
 
+        # Set only once get_extractor(...) actually resolves a configuration
+        # for this batch's team — stays None if the team has no active
+        # Claude API key configured, so the failure ApiUsage row below
+        # correctly records "no config was ever used", not a stale one.
+        claude_config_id: int | None = None
+
         attempt = 0
         while True:
             try:
                 photo_paths = await _resolve_photo_paths(item.images)
-                extractor = get_extractor()
+                extractor, claude_config_id = await get_extractor(session, item.batch.team)
                 result = await extractor.extract(photo_paths, item.tag_number, item.description)
                 break
             except ExtractionError as exc:
@@ -212,6 +218,7 @@ async def process_item(item_id: int, user_id: int) -> None:
                     session.add(ApiUsage(
                         user_id=user_id, tag_number=item.tag_number, model=settings.claude_model,
                         success=False, error_message=str(exc)[:2000],
+                        team=item.batch.team, claude_config_id=claude_config_id,
                     ))
                     await _set_status(session, item, ItemStatus.FAILED, str(exc))
                     return
@@ -228,10 +235,17 @@ async def process_item(item_id: int, user_id: int) -> None:
                 await _set_status(session, item, ItemStatus.FAILED, f"Unexpected error: {exc}")
                 return
 
+        # A batch created before its team had a configured key (claude_config_id
+        # was left null at creation, see batch_ingest.py) picks up whichever
+        # config just succeeded here — frozen from this point on, same as a
+        # batch that had one from the start. See app/models/batch.py.
+        if item.batch.claude_config_id is None:
+            item.batch.claude_config_id = claude_config_id
         session.add(ApiUsage(
             user_id=user_id, tag_number=item.tag_number, model=result.model,
             input_tokens=result.input_tokens, output_tokens=result.output_tokens,
             cost_usd=result.cost_usd, latency_ms=result.latency_ms, success=True,
+            team=item.batch.team, claude_config_id=claude_config_id,
         ))
         await session.commit()
 

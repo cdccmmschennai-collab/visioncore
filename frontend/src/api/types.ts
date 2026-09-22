@@ -1,4 +1,6 @@
 export type Role = 'admin' | 'user'
+export type Team = 'CHENNAI' | 'HYD' | 'QA'
+export const TEAMS: Team[] = ['CHENNAI', 'HYD', 'QA']
 export type Quality = 'Confirmed' | 'Verify'
 export type ItemStatus =
   | 'uploaded' | 'extracting' | 'processing' | 'retrying' | 'completed' | 'failed' | 'duplicate'
@@ -10,6 +12,7 @@ export interface User {
   email: string | null
   full_name: string | null
   role: Role
+  team: Team
   is_active: boolean
   last_login_at: string | null
   created_at: string
@@ -216,6 +219,36 @@ export interface AdminStats {
   total_batches: number
   total_uploads: number
   total_downloads: number
+}
+
+/** Never carries the real key — only a masked preview, or null when the
+ * team has no configuration at all yet. */
+export interface ClaudeConfig {
+  team: Team
+  masked_key: string | null
+  status: 'Configured' | 'Not Configured'
+  updated_at: string | null
+}
+
+export interface ClaudeConfigTestResult {
+  success: boolean
+  message: string
+}
+
+export interface TeamUsageRow {
+  team: Team
+  extractions: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cost_usd: number
+}
+
+/** Team-level usage from VisionCore's own extraction records — distinct
+ * from ClaudeUsageSummary above, which is Anthropic's org-wide official
+ * report and has no concept of team. */
+export interface TeamUsageSummary {
+  teams: TeamUsageRow[]
 }
 
 /** Field order for the editable table — must match the backend's FIELDS. */

@@ -13,6 +13,7 @@ from typing import OrderedDict
 from sqlalchemy import select
 
 from app.models import Activity, ActivityAction, AssetTag, Batch, BatchItem, BatchStatus, ItemStatus, TagImage
+from app.services.claude_config import get_active_config
 from app.services.storage import resolve_stored, stream_upload
 
 _MEDIA_BY_EXT = {
@@ -54,6 +55,12 @@ async def create_batch_with_items(
     processing it twice concurrently.
     """
     if batch is None:
+        # Snapshot the uploader's team and their team's current Claude
+        # config now — see app/models/batch.py. Left null (not an error)
+        # when the team has no configured key yet; process_item then fails
+        # each item with a clear message rather than falling back to
+        # another team's key (see app/services/ai_extractor.py).
+        config = await get_active_config(db, user.team)
         batch = Batch(
             reference=reference,
             user_id=user.id,
@@ -61,6 +68,8 @@ async def create_batch_with_items(
             total_images=0,
             total_tags=0,
             is_batch_process=is_batch_process,
+            team=user.team,
+            claude_config_id=config.id if config else None,
         )
         db.add(batch)
         await db.flush()

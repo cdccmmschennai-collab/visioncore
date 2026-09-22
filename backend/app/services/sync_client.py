@@ -195,6 +195,13 @@ async def _sync_one_page(client: httpx.AsyncClient, resource: str, path: str, mo
         if not rows:
             return False
 
+        # A page can contain a chain of tag_number edits/swaps across several
+        # asset_tags rows (production allows renaming an existing tag).
+        # Replaying it in id order can transiently collide with another row's
+        # not-yet-updated value under an immediate check, even though the
+        # page's final state is valid — so check deferrable constraints (see
+        # uq_asset_tags_tag_number, migration 0008) at COMMIT instead.
+        await session.execute(sa.text("SET CONSTRAINTS ALL DEFERRED"))
         await _upsert_page(session, model, rows)
         await _bump_sequence(session, model)
         if resource == "tag_images":

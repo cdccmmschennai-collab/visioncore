@@ -13,22 +13,31 @@ from app.core.security import hash_password
 from app.models import (
     Activity,
     ActivityAction,
+    ApiUsage,
     AssetTag,
     Batch,
+    ClaudeApiConfig,
     OrgCredits,
+    Team,
     User,
     UserRole,
 )
 from app.schemas.admin import (
     AdminStats,
+    ClaudeConfigOut,
+    ClaudeConfigTestResult,
+    ClaudeConfigUpdate,
     ClaudeModelUsage,
     ClaudeUsageDaily,
     ClaudeUsageSummary,
     OrgCreditsOut,
     OrgCreditsTopUp,
+    TeamUsageRow,
+    TeamUsageSummary,
 )
 from app.schemas.auth import AdminPasswordReset, UserCreate, UserOut, UserUpdate
 from app.schemas.common import Message
+from app.services import claude_config as claude_config_service
 from app.services.anthropic_usage import (
     UNAVAILABLE_METRICS,
     ClaudeUsageUnavailable,
@@ -60,6 +69,7 @@ async def create_user(body: UserCreate, admin: AdminUser, db: DbSession) -> User
         email=body.email,
         full_name=body.full_name,
         role=body.role,
+        team=body.team,
         hashed_password=hash_password(body.password),
     )
     db.add(user)
@@ -127,6 +137,96 @@ async def deactivate_user(user_id: int, admin: AdminUser, db: DbSession) -> Mess
                     detail=f"Disabled user {user.username}"))
     await db.commit()
     return Message(message=f"{user.username} has been disabled.")
+
+
+# Claude API team configuration — Admin-only. Keys are encrypted at rest
+# (see app/services/claude_config.py); the plaintext key is only ever held
+# in memory for the duration of a save/test-connection call, never returned
+# to the frontend, logged, or included in an error message.
+
+@router.get("/claude-configs", response_model=list[ClaudeConfigOut])
+async def list_claude_configs(admin: AdminUser, db: DbSession) -> list[ClaudeConfigOut]:
+    rows = {c.team: c for c in (await db.scalars(select(ClaudeApiConfig))).all()}
+    out: list[ClaudeConfigOut] = []
+    for team in Team:
+        row = rows.get(team)
+        if row is None or not row.is_active:
+            out.append(ClaudeConfigOut(team=team, masked_key=None, status="Not Configured", updated_at=None))
+            continue
+        masked = claude_config_service.mask_api_key(
+            claude_config_service.decrypt_api_key(row.api_key_encrypted)
+        )
+        out.append(ClaudeConfigOut(team=team, masked_key=masked, status="Configured", updated_at=row.updated_at))
+    return out
+
+
+@router.put("/claude-configs/{team}", response_model=ClaudeConfigOut)
+async def update_claude_config(
+    team: Team, body: ClaudeConfigUpdate, admin: AdminUser, db: DbSession
+) -> ClaudeConfigOut:
+    key = body.api_key.strip()
+    if not key.startswith("sk-ant-"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "That doesn't look like a valid Claude API key."
+        )
+    config = await claude_config_service.set_api_key(db, team, key, admin.id)
+    db.add(Activity(
+        user_id=admin.id, action=ActivityAction.USER_UPDATED,
+        detail=f"Updated the Claude API key for team {team.value}",
+    ))
+    await db.commit()
+    await db.refresh(config)
+    return ClaudeConfigOut(
+        team=team, masked_key=claude_config_service.mask_api_key(key),
+        status="Configured", updated_at=config.updated_at,
+    )
+
+
+@router.post("/claude-configs/{team}/test", response_model=ClaudeConfigTestResult)
+async def test_claude_config(team: Team, admin: AdminUser, db: DbSession) -> ClaudeConfigTestResult:
+    """Tests the currently-saved key for `team` — a minimal Anthropic call
+    (max_tokens=1), never logging or returning the key itself."""
+    config = await claude_config_service.get_active_config(db, team)
+    if config is None:
+        return ClaudeConfigTestResult(success=False, message="Claude API is not configured for this team.")
+    key = claude_config_service.decrypt_api_key(config.api_key_encrypted)
+    success, message = await claude_config_service.test_connection(key)
+    return ClaudeConfigTestResult(success=success, message=message)
+
+
+@router.get("/usage/by-team", response_model=TeamUsageSummary)
+async def usage_by_team(admin: AdminUser, db: DbSession) -> TeamUsageSummary:
+    """Team-level extraction usage from VisionCore's own api_usage table —
+    distinct from GET /admin/usage below, which is Anthropic's org-wide
+    official report and has no concept of team. Only successful extractions
+    are counted (cost_usd/tokens are only populated on success — see
+    pipeline.py), matching how the existing per-tag usage rows are recorded.
+    """
+    rows = (await db.execute(
+        select(
+            ApiUsage.team,
+            func.count().label("extractions"),
+            func.coalesce(func.sum(ApiUsage.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ApiUsage.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ApiUsage.cost_usd), 0.0).label("cost_usd"),
+        )
+        .where(ApiUsage.success.is_(True))
+        .group_by(ApiUsage.team)
+    )).all()
+    by_team = {r.team: r for r in rows}
+    return TeamUsageSummary(teams=[
+        TeamUsageRow(
+            team=team,
+            extractions=by_team[team].extractions if team in by_team else 0,
+            input_tokens=by_team[team].input_tokens if team in by_team else 0,
+            output_tokens=by_team[team].output_tokens if team in by_team else 0,
+            total_tokens=(
+                (by_team[team].input_tokens + by_team[team].output_tokens) if team in by_team else 0
+            ),
+            cost_usd=round(float(by_team[team].cost_usd), 6) if team in by_team else 0.0,
+        )
+        for team in Team
+    ])
 
 
 # Claude usage dashboard — sourced entirely from Anthropic's official

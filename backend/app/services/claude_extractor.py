@@ -114,15 +114,23 @@ captured by one of the dedicated fields above, as "LABEL: value" pairs \
 separated by ", " — body/trim materials, standards, pressure and temperature \
 ratings, certificate numbers, calibration data, drawing numbers, supply \
 voltages. Before adding any entry, check it against every dedicated field's \
-captured value (size_dimension, hazardous_classification, year/month of \
-manufacture, and all others) and omit it if it already appears there in any \
-form — do not restate a value already recorded in a dedicated field (e.g. no \
-plain "MONTH: 02" or "YEAR: 2024" line, since those live in \
-month_of_manufacture / year_of_manufacture; no "CLASS: 150RF" line if that \
-class was already folded into size_dimension per rule 12). A composite code \
-printed on the plate in its own right — such as a date code like "02/24" — \
-is still transcribed once as printed, since it documents the plate's own \
-notation, not a restatement.
+captured value — tag_number, description, size_dimension, make, model, \
+serial_no, part_no, weight, country, year_of_manufacture, \
+month_of_manufacture, hazardous_classification — and omit it if it \
+represents information already captured there, in any form. Do not restate a \
+value already recorded in a dedicated field: no plain "MONTH: 02" or \
+"YEAR: 2024" line, since those live in month_of_manufacture / \
+year_of_manufacture; no "COUNTRY: KOREA" line, or a bare country name, since \
+that lives in country; no "CLASS: 150RF" line if that class was already \
+folded into size_dimension per rule 12. This includes a manufacture-date \
+code printed under a "DATE:"-style label — once its month and year are \
+recorded in month_of_manufacture / year_of_manufacture (per rule 5), drop \
+the code entirely rather than transcribing it a second time. Keep a \
+composite code only when it captures information the dedicated fields do \
+not — a calibration date, an expiry date, a certificate date — labeled for \
+what it actually is (e.g. "EXPIRY: 24/09"), not filed under a generic \
+"DATE:" label that would make it look like a restatement of the manufacture \
+date.
 7. "hazardous_classification": capture the complete classification exactly as \
 printed, in full — the ATEX/IECEx marking including certificate numbers, \
 ingress rating, temperature class, and group/category markings, if present. \
@@ -154,8 +162,12 @@ the plate as confirmation. quality = "Confirmed" only when the equipment \
 type is unambiguous from the photo or a printed label; "Verify" if you are \
 inferring it from limited visual cues.
 
-Before returning the JSON, validate: size_dimension includes its class/rating; \
-no dedicated field's value is repeated in additional_information; and \
+Before returning the JSON, run a deduplication pass on additional_information: \
+compare every entry against the final value of every dedicated field \
+(including country, year_of_manufacture, and month_of_manufacture) and \
+remove any entry that represents the same information, however it's \
+labeled or formatted, keeping only what is genuinely not captured \
+elsewhere. Also validate: size_dimension includes its class/rating; and \
 hazardous_classification holds the complete "EX..." string unmodified.
 """
 

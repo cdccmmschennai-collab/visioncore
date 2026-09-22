@@ -273,13 +273,18 @@ export default function NewBatch() {
               && item.asset_tag && !autoSavedRef.current.has(item.id)
             if (!justResolved) return
             autoSavedRef.current.add(item.id)
-            if (item.status === 'completed') void pushExtractedWorkbooks(item.asset_tag!)
+             // A duplicate item's asset_tag points at the pre-existing
+            // AssetTag, whose AI/Template files already exist (and self-heal
+            // on download if missing — see _download in api/v1/tags.py) —
+            // so it's just as downloadable as a freshly-extracted tag and
+            // must not be excluded from either auto-save path below.
+            if (item.status === 'completed' || item.status === 'duplicate') void pushExtractedWorkbooks(item.asset_tag!)
             if (dirForThisBatch) void writeAiExtractionCopy(dirForThisBatch, item)
             // Drag-and-drop's own auto-save folder — only for a batch that
             // isn't the active Batch Process run (dirForThisBatch is only
             // ever set for that one), so the two never write into each other's
             // folders even if both have been picked in the same session.
-            if (!dirForThisBatch && item.status === 'completed' && dragDropDirRef.current) {
+             if (!dirForThisBatch && (item.status === 'completed' || item.status === 'duplicate') && dragDropDirRef.current) {
               void writeDragDropAutoSave(dragDropDirRef.current, item)
             }
           })

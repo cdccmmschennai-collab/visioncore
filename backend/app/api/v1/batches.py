@@ -268,8 +268,12 @@ async def upload(
     batch, duplicate_tags, new_item_ids = await create_batch_with_items(db, reference, grouped, user)
     duplicates = [_asset_tag_out(t) for t in duplicate_tags]
 
-    if new_item_ids:
-        background.add_task(process_batch, batch.id, user.id, new_item_ids)
+    # Always dispatch — even with zero new items (every tag in this batch was
+    # already extracted) — so _rollup_batch_status still runs and moves the
+    # batch out of UPLOADED into a terminal status. Without this, an
+    # all-duplicate batch never reaches COMPLETED and the frontend polls it
+    # forever (see the matching comment on batch_process() below).
+    background.add_task(process_batch, batch.id, user.id, new_item_ids)
 
     batch = await _load_batch(db, batch.id, user)
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
@@ -344,16 +348,16 @@ async def batch_process(
     )
     duplicates = [_asset_tag_out(t) for t in duplicate_tags]
 
-    # An appended chunk always schedules a process_batch call — even with
-    # zero new items (e.g. every tag in this chunk was already extracted) —
-    # so a rollup runs after every chunk lands; that's what guarantees some
+    # Always schedule a process_batch call — even with zero new items (e.g.
+    # every tag in this chunk was already extracted) — so a rollup runs after
+    # every chunk lands. For an appended chunk this also guarantees some
     # later call sees the complete, final item set once every chunk is in
     # (see process_batch's item_ids param and _rollup_batch_status in
     # app/services/pipeline.py for why an unscoped rescan would race here).
-    # The very first chunk keeps the original "nothing new, don't bother"
-    # behavior, since a single-chunk run has no such race to guard against.
-    if new_item_ids or existing_batch is not None:
-        background.add_task(process_batch, batch.id, user.id, new_item_ids)
+     # For the first/only chunk, this is what moves an all-duplicate batch out
+    # of UPLOADED into a terminal status — without it the batch never
+    # reaches COMPLETED and the frontend polls it forever.
+    background.add_task(process_batch, batch.id, user.id, new_item_ids)
 
     batch = await _load_batch(db, batch.id, user)
     return UploadResponse(batch=_batch_out(batch), rejected=rejected, duplicates=duplicates)
