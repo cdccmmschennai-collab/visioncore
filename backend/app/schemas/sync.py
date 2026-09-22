@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.models.activity import ActivityAction
 from app.models.batch import BatchStatus
+from app.models.claude_config import Team
 from app.models.tag import ItemStatus
 from app.models.user import UserRole
 from app.schemas.common import ORMModel
@@ -24,6 +25,7 @@ class SyncUserOut(ORMModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole
+    team: Team
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -42,6 +44,7 @@ class SyncUserPush(BaseModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole
+    team: Team
     is_active: bool
 
 

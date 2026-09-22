@@ -147,6 +147,7 @@ async def push_user(body: SyncUserPush, _: SyncAuth, db: DbSession) -> SyncUserO
     user.email = body.email
     user.full_name = body.full_name
     user.role = body.role
+    user.team = body.team
     user.is_active = body.is_active
     await db.commit()
     await db.refresh(user)

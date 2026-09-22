@@ -15,10 +15,13 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.core import deps
 from app.core.config import settings
 from app.models import User, UserRole
+from app.models import AssetTag, Batch
 from app.services.sync_client import (
+    _CONFLICT_COLUMN,
     _PROTECTED_COLUMNS,
     _UNUSABLE_PASSWORD_HASH,
     _coerce_row,
+    _updatable_columns,
     push_user,
 )
 
@@ -44,6 +47,45 @@ def test_coerce_row_passes_through_none_and_drops_unknown_keys():
 
 def test_user_credentials_are_never_overwritten_by_a_sync_upsert():
     assert _PROTECTED_COLUMNS[User] == frozenset({"hashed_password", "last_login_at"})
+
+
+def test_updatable_columns_never_includes_a_column_absent_from_the_payload():
+    # Regression test: a column the sender's Sync*Out schema doesn't include
+    # (e.g. `team`, added to the users table after schemas/sync.py's
+    # SyncUserOut was last updated) must NOT appear in the UPDATE SET
+    # clause — including it would resolve to that column's DEFAULT via
+    # Postgres's `excluded` pseudo-row (it was never in the INSERT's value
+    # list), silently resetting an existing row's real value on every future
+    # sync upsert. This is exactly what happened to users.team in practice.
+    values = {"id": 5, "username": "HYD_User", "email": None}
+    cols = _updatable_columns(values, frozenset())
+    assert "team" not in cols
+    assert set(cols) == {"username", "email"}
+
+
+def test_updatable_columns_excludes_id_and_protected_columns():
+    values = {"id": 5, "username": "x", "hashed_password": "y", "last_login_at": None}
+    cols = _updatable_columns(values, _PROTECTED_COLUMNS[User])
+    assert set(cols) == {"username"}
+
+
+def test_user_upserts_by_username_not_id():
+    # Regression test: users can be created independently on both
+    # production and this local mirror (push_user runs both directions —
+    # see sync_client.push_user and app/api/v1/sync.py::push_user), so each
+    # side auto-assigns its own id from its own sequence. The SAME username
+    # can therefore land under two different ids across environments —
+    # upserting by id would create a duplicate-username row (or collide
+    # with uq_users_username) instead of recognizing it as the same account.
+    assert _CONFLICT_COLUMN[User] == "username"
+
+
+def test_every_other_synced_resource_still_upserts_by_id():
+    # Every resource except User is only ever created by pulling from
+    # production (a genuinely pure mirror — see module docstring), so
+    # upserting by id remains correct and unchanged for them.
+    assert _CONFLICT_COLUMN.get(AssetTag, "id") == "id"
+    assert _CONFLICT_COLUMN.get(Batch, "id") == "id"
 
 
 def test_placeholder_password_can_never_be_used_to_log_in():
