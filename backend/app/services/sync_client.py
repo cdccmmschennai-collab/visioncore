@@ -14,7 +14,9 @@ Design:
     always resolve locally before the row that references them arrives.
   * Idempotent upsert via `INSERT ... ON CONFLICT (id) DO UPDATE`, using
     production's own primary keys directly (safe because local is a pure
-    mirror — see the ID-collision discussion this design followed from).
+    mirror for every resource except users — see _CONFLICT_COLUMN and
+    _user_id_map below for why users needs different handling, and the
+    ID-collision discussion this design originally followed from).
   * The cursor only advances after a page's rows are committed locally, so a
     crash mid-page is safely retried from the same page next cycle — the
     ON CONFLICT upsert makes that page idempotent, never duplicated.
@@ -61,6 +63,41 @@ _PROTECTED_COLUMNS: dict[type, frozenset[str]] = {
     User: frozenset({"hashed_password", "last_login_at"}),
 }
 
+#: ON CONFLICT arbiter column per resource. Defaults to "id" — safe only
+#: when local is a genuinely pure mirror, i.e. rows of that resource are
+#: ever created by pulling from production, never independently on this
+#: side (true for every resource except users). Overridden to "username"
+#: for User: push_user (both directions — see below and app/api/v1/
+#: sync.py) means a user CAN be created independently on either side, each
+#: auto-assigning its own id from its own sequence, so the same real-world
+#: account can end up under two different ids across environments.
+#: username — the actual business key an admin chose — is what correctly
+#: identifies "the same user" here; upserting by id instead would either
+#: create a duplicate-username row or collide with uq_users_username.
+_CONFLICT_COLUMN: dict[type, str] = {User: "username"}
+
+#: Every other synced resource's own id is a pure mirror of production's —
+#: safe to use as-is. But a column on one of THEM that references users.id
+#: is not: because a user can now be created independently on both sides
+#: (see _CONFLICT_COLUMN above), the SAME account can sit under two
+#: different ids across environments, so a raw production user_id pulled in
+#: on an activities/batches/asset_tags row may not exist locally at all —
+#: it needs translating through _user_id_map first. Resource -> the column
+#: names on it that hold a users.id reference.
+_USER_FK_COLUMNS: dict[type, tuple[str, ...]] = {
+    AssetTag: ("created_by_id", "edited_by_id"),
+    Batch: ("user_id",),
+    Activity: ("user_id",),
+}
+
+#: production user id -> this mirror's own local id for that same user
+#: (matched by username, populated in _upsert_page as `users` pages sync —
+#: see _RESOURCES' FK ordering, which guarantees users syncs before anything
+#: that could need this). Process-lifetime cache: once learned, a mapping
+#: stays valid — usernames aren't renamed, and a user is never re-created
+#: under a new id on either side.
+_user_id_map: dict[int, int] = {}
+
 #: Unusable bcrypt-shaped placeholder for a brand-new mirrored user — no
 #: password will ever hash to this, so the account can't be logged into
 #: locally until an admin sets a real password.
@@ -83,25 +120,50 @@ def _coerce_row(table: sa.Table, row: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _updatable_columns(values: dict[str, Any], protected: frozenset[str]) -> list[str]:
+    """Which columns an upsert's ON CONFLICT DO UPDATE should touch: only
+    ones `values` actually carries, minus `id` and any protected column.
+
+    Deliberately NOT "every column the table has" — a column the sender's
+    Sync*Out schema doesn't include (e.g. one added after that schema was
+    last updated) is simply absent from `values`. If the SET clause included
+    it anyway, `stmt.excluded.<col>` would resolve to that column's DEFAULT
+    (it was never in the INSERT's value list), silently overwriting an
+    existing row's real value with the schema default on every future
+    upsert — exactly what happened to `users.team` before this existed.
+    """
+    return [name for name in values if name != "id" and name not in protected]
+
+
 async def _upsert_page(session, model: type, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     table = model.__table__
     protected = _PROTECTED_COLUMNS.get(model, frozenset())
+    conflict_col = _CONFLICT_COLUMN.get(model, "id")
 
     for row in rows:
         values = _coerce_row(table, row)
         if model is User and "hashed_password" not in row:
             values["hashed_password"] = _UNUSABLE_PASSWORD_HASH
 
+        for fk_col in _USER_FK_COLUMNS.get(model, ()):
+            if fk_col in values and values[fk_col] is not None:
+                values[fk_col] = _user_id_map.get(values[fk_col], values[fk_col])
+
         stmt = pg_insert(table).values(**values)
         update_cols = {
-            c.name: getattr(stmt.excluded, c.name)
-            for c in table.columns
-            if c.name != "id" and c.name not in protected
+            name: getattr(stmt.excluded, name)
+            for name in _updatable_columns(values, protected)
+            if name != conflict_col
         }
-        stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=update_cols)
+        stmt = stmt.on_conflict_do_update(index_elements=[conflict_col], set_=update_cols)
         await session.execute(stmt)
+
+        if model is User:
+            local_id = await session.scalar(sa.select(User.id).where(User.username == values["username"]))
+            if local_id is not None:
+                _user_id_map[row["id"]] = local_id
 
 
 async def _bump_sequence(session, model: type) -> None:
@@ -219,6 +281,40 @@ async def _sync_one_page(client: httpx.AsyncClient, resource: str, path: str, mo
         return len(rows) == PAGE_SIZE
 
 
+async def _refresh_user_id_map(client: httpx.AsyncClient) -> None:
+    """Full reconciliation of `_user_id_map` against production, independent
+    of the persisted `users` SyncCursor. Run once at startup: `_user_id_map`
+    is in-memory only (reset on every process restart), so without this, a
+    page for any OTHER resource (asset_tags/batches/activities) referencing
+    a user whose own `users` page was consumed in a PREVIOUS process
+    lifetime — the `users` cursor is already past it, so no new page for it
+    arrives this run — would have no mapping to resolve that reference
+    against, even though the user genuinely exists locally under a
+    different id (see _CONFLICT_COLUMN).
+    """
+    since_updated_at, since_id = EPOCH.isoformat(), 0
+    while True:
+        response = await client.get(
+            "/api/v1/sync/users",
+            params={"since_updated_at": since_updated_at, "since_id": since_id},
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not rows:
+            return
+        async with AsyncSessionLocal() as session:
+            for row in rows:
+                local_id = await session.scalar(
+                    sa.select(User.id).where(User.username == row["username"])
+                )
+                if local_id is not None:
+                    _user_id_map[row["id"]] = local_id
+        last = rows[-1]
+        since_updated_at, since_id = last["updated_at"], last["id"]
+        if len(rows) < PAGE_SIZE:
+            return
+
+
 async def push_user(user: User) -> None:
     """Local -> production: best-effort push of a locally-created user so it
     also shows up on production — the inverse of the pull loop below, added
@@ -239,6 +335,7 @@ async def push_user(user: User) -> None:
         "email": user.email,
         "full_name": user.full_name,
         "role": user.role.value,
+        "team": user.team.value,
         "is_active": user.is_active,
     }
     try:
@@ -270,6 +367,14 @@ async def run_sync_loop() -> None:
         base_url=settings.sync_source_url, headers=headers, timeout=30.0
     ) as client:
         logger.info("Production sync starting — pulling from %s", settings.sync_source_url)
+        try:
+            await _refresh_user_id_map(client)
+        except Exception:
+            logger.exception(
+                "Could not build the initial production->local user id map — "
+                "FK references to a user with a mismatched id may fail until a "
+                "later cycle retries this."
+            )
         while True:
             try:
                 more_pending = False
