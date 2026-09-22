@@ -44,14 +44,14 @@ def test_mask_api_key_never_raises_on_a_short_string():
 
 
 def test_team_enum_matches_the_three_required_teams():
-    assert {t.value for t in Team} == {"CHENNAI", "HYD", "QA"}
+    assert {t.value for t in Team} == {"CHENNAI", "HYDERABAD", "QATAR"}
 
 
 def test_claude_config_error_message_never_names_another_teams_key():
     # get_decrypted_key raises this exact message shape for an unconfigured
     # team (see app/services/ai_extractor.py) — never suggesting or naming
     # a fallback key from another team.
-    error = ClaudeConfigError(f"Claude API is not configured for the {Team.HYD.value} team.")
-    assert "HYD" in str(error)
+    error = ClaudeConfigError(f"Claude API is not configured for the {Team.HYDERABAD.value} team.")
+    assert "HYDERABAD" in str(error)
     assert "CHENNAI" not in str(error)
-    assert "QA" not in str(error)
+    assert "QATAR" not in str(error)

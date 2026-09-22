@@ -8,7 +8,14 @@ import type { User } from '@/api/types'
 interface AuthValue {
   user: User | null
   loading: boolean
+  /** Either kind of admin (Overall or Branch) — gates the Admin page/nav
+   * link and other broadly-admin-ish UI. The backend independently enforces
+   * exactly what each kind can actually do; this only decides what to show. */
   isAdmin: boolean
+  /** Overall Admin only — gates org-wide-only UI (Claude API Settings, the
+   * Anthropic usage report, organization credits, promoting another user to
+   * admin/branch_admin). A Branch Admin is isAdmin but NOT isOverallAdmin. */
+  isOverallAdmin: boolean
   signIn: (username: string, password: string, remember: boolean) => Promise<void>
   signOut: () => void
 }
@@ -168,7 +175,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const value = useMemo<AuthValue>(
-    () => ({ user, loading, isAdmin: user?.role === 'admin', signIn, signOut }),
+    () => ({
+      user, loading,
+      isAdmin: user?.role === 'admin' || user?.role === 'branch_admin',
+      isOverallAdmin: user?.role === 'admin',
+      signIn, signOut,
+    }),
     [user, loading, signIn, signOut],
   )
 

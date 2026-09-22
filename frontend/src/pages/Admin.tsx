@@ -3,7 +3,7 @@ import Modal from '@/components/Modal'
 import Spinner from '@/components/Spinner'
 import { api } from '@/api/client'
 import type {
-  AdminStats, ClaudeConfig, ClaudeUsageSummary, OrgCredits, Team, TeamUsageSummary, User,
+  AdminStats, ClaudeConfig, ClaudeUsageSummary, OrgCredits, Role, Team, TeamUsageSummary, User,
 } from '@/api/types'
 import { TEAMS } from '@/api/types'
 import { formatNumber } from '@/utils/filename'
@@ -19,7 +19,7 @@ const USAGE_REFRESH_INTERVAL_MS = 60_000
 const NOT_AVAILABLE_TEXT = "Not available from Anthropic's official API."
 
 export default function Admin() {
-  const { user: me } = useAuth()
+  const { user: me, isOverallAdmin } = useAuth()
   const toast = useToast()
   const [tab, setTab] = useState<Tab>('usage')
 
@@ -139,16 +139,25 @@ export default function Admin() {
 
   useEffect(() => { void load() }, [load])
 
+  // The Anthropic-official report and Organization Credits are Overall
+  // Admin only on the backend (see admin.py) — a Branch Admin would just
+  // get a 403 on every refresh, so skip fetching them entirely rather than
+  // showing a spurious error. Claude Usage by Team is fetched for everyone;
+  // the backend already scopes it to the caller's own branch.
   useEffect(() => {
-    void loadUsage()
-    void loadOrgCredits()
     void loadTeamUsage()
-    const id = setInterval(() => {
-      void loadUsage(); void loadOrgCredits(); void loadTeamUsage()
-    }, USAGE_REFRESH_INTERVAL_MS)
+    const fetchers = isOverallAdmin
+      ? [loadUsage, loadOrgCredits, loadTeamUsage]
+      : [loadTeamUsage]
+    const id = setInterval(() => { fetchers.forEach((fn) => void fn()) }, USAGE_REFRESH_INTERVAL_MS)
+    if (isOverallAdmin) { void loadUsage(); void loadOrgCredits() }
     return () => clearInterval(id)
-  }, [loadUsage, loadOrgCredits, loadTeamUsage])
+  }, [loadUsage, loadOrgCredits, loadTeamUsage, isOverallAdmin])
 
+  // Claude API Settings is visible to every admin now — the backend scopes
+  // GET/PUT/POST to just the caller's own branch for a Branch Admin (see
+  // admin.py's _require_own_team), so this always returns exactly what
+  // they're allowed to see/change.
   useEffect(() => { void loadClaudeConfigs() }, [loadClaudeConfigs])
 
   const toggleActive = async (target: User) => {
@@ -161,7 +170,7 @@ export default function Admin() {
     }
   }
 
-  const changeRole = async (target: User, role: 'admin' | 'user') => {
+  const changeRole = async (target: User, role: Role) => {
     try {
       const updated = await api.updateUser(target.id, { role })
       setUsers((list) => list.map((u) => (u.id === updated.id ? updated : u)))
@@ -193,7 +202,9 @@ export default function Admin() {
     <div className="page stack gap-24">
       <header className="page-head">
         <div className="stack gap-4">
-          <span className="eyebrow">Administration</span>
+          <span className="eyebrow">
+            {isOverallAdmin ? 'Administration' : `Administration — ${me?.team} branch`}
+          </span>
           <h1>Admin</h1>
         </div>
         <div className="tabs" role="tablist">
@@ -235,6 +246,7 @@ export default function Admin() {
             <Stat label="Active users" value={`${stats.active_users} / ${stats.total_users}`} />
           </div>
 
+          {isOverallAdmin && (
           <section className="card stack gap-16">
             <div className="card-head" style={{ marginBottom: 0 }}>
               <div className="stack gap-4">
@@ -272,9 +284,20 @@ export default function Admin() {
               <div className="alert alert-error">
                 <span aria-hidden="true">!</span>
                 <span>
-                  Claude usage data is unavailable — {usage.error} Create an Admin API key in
-                  the Claude Console (Settings → Admin API keys) and set
-                  {' '}<code>ANTHROPIC_ADMIN_API_KEY</code> in the backend <code>.env</code>, then refresh.
+                  Claude usage data is unavailable — {usage.error}
+                  {/* The backend's error text is already specific and complete
+                      (rate-limited, unreachable, bad key, ...) — only a
+                      genuinely missing key needs this extra how-to-fix
+                      appended, since a rate-limit or network hiccup means
+                      the key IS configured and working, and telling the
+                      admin to go reconfigure it would be actively wrong. */}
+                  {usage.error?.includes('ANTHROPIC_ADMIN_API_KEY is not configured') && (
+                    <>
+                      {' '}Create an Admin API key in the Claude Console (Settings → Admin
+                      API keys) and set <code>ANTHROPIC_ADMIN_API_KEY</code> in the backend
+                      {' '}<code>.env</code>, then refresh.
+                    </>
+                  )}
                 </span>
               </div>
             )}
@@ -326,6 +349,7 @@ export default function Admin() {
               </>
             )}
           </section>
+          )}
 
           <section className="card stack gap-16">
             <div className="card-head" style={{ marginBottom: 0 }}>
@@ -377,6 +401,7 @@ export default function Admin() {
             )}
           </section>
 
+          {isOverallAdmin && (
           <section className="card stack gap-16">
             <div className="card-head" style={{ marginBottom: 0 }}>
               <div className="stack gap-4">
@@ -469,6 +494,35 @@ export default function Admin() {
               </>
             )}
           </section>
+          )}
+
+          {!isOverallAdmin && (
+            <section className="card stack gap-16">
+              <div className="stack gap-4">
+                <h3>Estimated Spend — {me?.team}</h3>
+                <span className="muted">
+                  Summed from VisionCore's own extraction records for your branch (the same
+                  figures as Claude Usage by Team above) — not an Anthropic-verified balance.
+                  Anthropic's official Usage &amp; Cost API is read through a single org-wide
+                  admin key and can't be split per branch, so Organization Credits (a whole-org
+                  purchased-credit balance) isn't shown here.
+                </span>
+              </div>
+              {(() => {
+                const mine = teamUsage?.teams.find((row) => row.team === me?.team)
+                return (
+                  <div className="stat-grid">
+                    <Stat
+                      label="Estimated spend (USD)"
+                      value={mine ? `$${mine.cost_usd.toFixed(4)}` : '—'}
+                      hint="Sum of cost_usd across this branch's successful extractions"
+                    />
+                    <Stat label="Extractions" value={mine ? formatNumber(mine.extractions) : '—'} small />
+                  </div>
+                )
+              })()}
+            </section>
+          )}
 
         </div>
       )}
@@ -508,18 +562,27 @@ export default function Admin() {
                         <select
                           className="select"
                           value={row.role}
-                          disabled={isMe}
-                          onChange={(event) => changeRole(row, event.target.value as 'admin' | 'user')}
+                          disabled={isMe || !isOverallAdmin}
+                          title={!isOverallAdmin ? 'Only an Overall Admin can change roles.' : undefined}
+                          onChange={(event) => changeRole(row, event.target.value as Role)}
                           aria-label={`Role for ${row.username}`}
                         >
                           <option value="user">User</option>
-                          <option value="admin">Admin</option>
+                          {/* A Branch Admin only ever sees users already in their own
+                              branch and can't grant admin access (enforced on the
+                              backend too — see admin.py's create_user/update_user) —
+                              the select above is disabled for them entirely, but keep
+                              the option list itself Overall-Admin-only for clarity. */}
+                          {isOverallAdmin && <option value="branch_admin">Branch Admin</option>}
+                          {isOverallAdmin && <option value="admin">Overall Admin</option>}
                         </select>
                       </td>
                       <td>
                         <select
                           className="select"
                           value={row.team}
+                          disabled={!isOverallAdmin}
+                          title={!isOverallAdmin ? "A Branch Admin can't move a user to another branch." : undefined}
                           onChange={(event) => changeTeam(row, event.target.value as Team)}
                           aria-label={`Team for ${row.username}`}
                         >
@@ -566,8 +629,9 @@ export default function Admin() {
             </button>
           </div>
           <p className="muted" style={{ margin: 0 }}>
-            Each team's extractions use only its own Claude API key — the full key is never sent
-            to the browser; only a masked preview is shown below.
+            {isOverallAdmin
+              ? "Each team's extractions use only its own Claude API key — the full key is never sent to the browser; only a masked preview is shown below."
+              : `Your branch's Claude API key — the full key is never sent to the browser; only a masked preview is shown below.`}
           </p>
 
           {claudeConfigsLoading && claudeConfigs.length === 0 && (
@@ -584,6 +648,8 @@ export default function Admin() {
 
       <CreateUserModal
         open={createOpen}
+        isOverallAdmin={isOverallAdmin}
+        defaultTeam={me?.team ?? 'CHENNAI'}
         onClose={() => setCreateOpen(false)}
         onCreated={(created) => { setUsers((list) => [created, ...list]); setCreateOpen(false) }}
       />
@@ -619,12 +685,15 @@ function Stat({
 }
 
 function CreateUserModal({
-  open, onClose, onCreated,
-}: { open: boolean; onClose: () => void; onCreated: (user: User) => void }) {
+  open, isOverallAdmin, defaultTeam, onClose, onCreated,
+}: {
+  open: boolean; isOverallAdmin: boolean; defaultTeam: Team
+  onClose: () => void; onCreated: (user: User) => void
+}) {
   const toast = useToast()
   const [form, setForm] = useState({
-    username: '', password: '', full_name: '', email: '', role: 'user' as 'admin' | 'user',
-    team: 'CHENNAI' as Team,
+    username: '', password: '', full_name: '', email: '', role: 'user' as Role,
+    team: defaultTeam,
   })
   const [busy, setBusy] = useState(false)
 
@@ -637,11 +706,15 @@ function CreateUserModal({
         password: form.password,
         full_name: form.full_name.trim() || null,
         email: form.email.trim() || null,
-        role: form.role,
-        team: form.team,
+        // A Branch Admin can only ever create a plain user in their own
+        // branch — the fields below are disabled for them, but pin the
+        // values sent regardless of any stale state, matching what the
+        // backend independently enforces (see admin.py's create_user).
+        role: isOverallAdmin ? form.role : 'user',
+        team: isOverallAdmin ? form.team : defaultTeam,
       })
       toast.success(`Created ${created.username}.`)
-      setForm({ username: '', password: '', full_name: '', email: '', role: 'user', team: 'CHENNAI' })
+      setForm({ username: '', password: '', full_name: '', email: '', role: 'user', team: defaultTeam })
       onCreated(created)
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : 'Could not create that user.')
@@ -688,17 +761,22 @@ function CreateUserModal({
         <div className="field">
           <label htmlFor="new-role">Role</label>
           <select
-            id="new-role" className="select" value={form.role}
-            onChange={(e) => setForm((f) => ({ ...f, role: e.target.value as 'admin' | 'user' }))}
+            id="new-role" className="select" value={isOverallAdmin ? form.role : 'user'}
+            disabled={!isOverallAdmin}
+            title={!isOverallAdmin ? 'Branch admins can only create regular users.' : undefined}
+            onChange={(e) => setForm((f) => ({ ...f, role: e.target.value as Role }))}
           >
             <option value="user">User</option>
-            <option value="admin">Admin</option>
+            {isOverallAdmin && <option value="branch_admin">Branch Admin</option>}
+            {isOverallAdmin && <option value="admin">Overall Admin</option>}
           </select>
         </div>
         <div className="field">
           <label htmlFor="new-team">Team</label>
           <select
-            id="new-team" className="select" value={form.team}
+            id="new-team" className="select" value={isOverallAdmin ? form.team : defaultTeam}
+            disabled={!isOverallAdmin}
+            title={!isOverallAdmin ? `Branch admins can only create users in their own branch (${defaultTeam}).` : undefined}
             onChange={(e) => setForm((f) => ({ ...f, team: e.target.value as Team }))}
           >
             {TEAMS.map((team) => <option key={team} value={team}>{team}</option>)}

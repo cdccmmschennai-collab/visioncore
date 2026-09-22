@@ -16,8 +16,8 @@ from app.db.base import Base, TimestampMixin
 
 class Team(str, enum.Enum):
     CHENNAI = "CHENNAI"
-    HYD = "HYD"
-    QA = "QA"
+    HYDERABAD = "HYDERABAD"
+    QATAR = "QATAR"
 
 
 class ClaudeApiConfig(Base, TimestampMixin):

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.config import settings
-from app.core.deps import AdminUser, DbSession
+from app.core.deps import AdminUser, AnyAdminUser, DbSession, team_scope
 from app.core.security import hash_password
 from app.models import (
     Activity,
@@ -49,16 +49,32 @@ from app.services.sync_client import push_user
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-# Users
+# Users — Overall Admin sees/manages every branch; a Branch Admin is scoped
+# to exactly their own team, enforced here (query filters + explicit checks
+# below), not just hidden in the frontend. See app/core/deps.py.
 
 @router.get("/users", response_model=list[UserOut])
-async def list_users(admin: AdminUser, db: DbSession) -> list[UserOut]:
-    rows = (await db.scalars(select(User).order_by(User.created_at.desc()))).all()
+async def list_users(admin: AnyAdminUser, db: DbSession) -> list[UserOut]:
+    query = select(User).order_by(User.created_at.desc())
+    scope = team_scope(admin)
+    if scope is not None:
+        query = query.where(User.team == scope)
+    rows = (await db.scalars(query)).all()
     return [UserOut.model_validate(u) for u in rows]
 
 
 @router.post("/users", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-async def create_user(body: UserCreate, admin: AdminUser, db: DbSession) -> UserOut:
+async def create_user(body: UserCreate, admin: AnyAdminUser, db: DbSession) -> UserOut:
+    if admin.role == UserRole.BRANCH_ADMIN:
+        if body.role != UserRole.USER:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Branch admins can only create regular users."
+            )
+        if body.team != admin.team:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Branch admins can only create users in their own team ({admin.team.value}).",
+            )
     clash = await db.scalar(select(User).where(User.username == body.username))
     if clash is not None:
         raise HTTPException(
@@ -84,13 +100,22 @@ async def create_user(body: UserCreate, admin: AdminUser, db: DbSession) -> User
     return UserOut.model_validate(user)
 
 
+def _require_same_branch(admin: User, target: User) -> None:
+    """A Branch Admin may only touch a user already in their own team — 403,
+    not a silent no-op, so an ID-guessed request to another branch is
+    rejected outright rather than quietly doing nothing."""
+    if admin.role == UserRole.BRANCH_ADMIN and target.team != admin.team:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "That user belongs to another branch.")
+
+
 @router.patch("/users/{user_id}", response_model=UserOut)
 async def update_user(
-    user_id: int, body: UserUpdate, admin: AdminUser, db: DbSession
+    user_id: int, body: UserUpdate, admin: AnyAdminUser, db: DbSession
 ) -> UserOut:
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such user.")
+    _require_same_branch(admin, user)
 
     # Guard against an admin locking every administrator out of the system.
     if user.id == admin.id and (body.role == UserRole.USER or body.is_active is False):
@@ -98,6 +123,16 @@ async def update_user(
             status.HTTP_400_BAD_REQUEST,
             "You can't remove your own admin access or disable your own account.",
         )
+
+    if admin.role == UserRole.BRANCH_ADMIN:
+        if body.role is not None and body.role != UserRole.USER:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Branch admins can't grant admin access."
+            )
+        if body.team is not None and body.team != admin.team:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Branch admins can't move a user to another branch."
+            )
 
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(user, field, value)
@@ -111,11 +146,12 @@ async def update_user(
 
 @router.post("/users/{user_id}/reset-password", response_model=Message)
 async def reset_password(
-    user_id: int, body: AdminPasswordReset, admin: AdminUser, db: DbSession
+    user_id: int, body: AdminPasswordReset, admin: AnyAdminUser, db: DbSession
 ) -> Message:
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such user.")
+    _require_same_branch(admin, user)
     user.hashed_password = hash_password(body.new_password)
     db.add(Activity(user_id=admin.id, action=ActivityAction.PASSWORD_RESET,
                     detail=f"Reset password for {user.username}"))
@@ -124,11 +160,12 @@ async def reset_password(
 
 
 @router.delete("/users/{user_id}", response_model=Message)
-async def deactivate_user(user_id: int, admin: AdminUser, db: DbSession) -> Message:
+async def deactivate_user(user_id: int, admin: AnyAdminUser, db: DbSession) -> Message:
     """Deactivate rather than delete — history rows must keep their author."""
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such user.")
+    _require_same_branch(admin, user)
     if user.id == admin.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "You can't disable your own account.")
@@ -139,16 +176,27 @@ async def deactivate_user(user_id: int, admin: AdminUser, db: DbSession) -> Mess
     return Message(message=f"{user.username} has been disabled.")
 
 
-# Claude API team configuration — Admin-only. Keys are encrypted at rest
-# (see app/services/claude_config.py); the plaintext key is only ever held
-# in memory for the duration of a save/test-connection call, never returned
-# to the frontend, logged, or included in an error message.
+# Claude API team configuration. A Branch Admin may view/update/test only
+# their own team's key (never another branch's) — enforced below, same
+# pattern as _require_same_branch for users. Keys are encrypted at rest (see
+# app/services/claude_config.py); the plaintext key is only ever held in
+# memory for the duration of a save/test-connection call, never returned to
+# the frontend, logged, or included in an error message.
+
+def _require_own_team(admin: User, team: Team) -> None:
+    if admin.role == UserRole.BRANCH_ADMIN and team != admin.team:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Branch admins can only manage their own team's Claude API key."
+        )
+
 
 @router.get("/claude-configs", response_model=list[ClaudeConfigOut])
-async def list_claude_configs(admin: AdminUser, db: DbSession) -> list[ClaudeConfigOut]:
+async def list_claude_configs(admin: AnyAdminUser, db: DbSession) -> list[ClaudeConfigOut]:
+    scope = team_scope(admin)
+    teams = [scope] if scope is not None else list(Team)
     rows = {c.team: c for c in (await db.scalars(select(ClaudeApiConfig))).all()}
     out: list[ClaudeConfigOut] = []
-    for team in Team:
+    for team in teams:
         row = rows.get(team)
         if row is None or not row.is_active:
             out.append(ClaudeConfigOut(team=team, masked_key=None, status="Not Configured", updated_at=None))
@@ -162,8 +210,9 @@ async def list_claude_configs(admin: AdminUser, db: DbSession) -> list[ClaudeCon
 
 @router.put("/claude-configs/{team}", response_model=ClaudeConfigOut)
 async def update_claude_config(
-    team: Team, body: ClaudeConfigUpdate, admin: AdminUser, db: DbSession
+    team: Team, body: ClaudeConfigUpdate, admin: AnyAdminUser, db: DbSession
 ) -> ClaudeConfigOut:
+    _require_own_team(admin, team)
     key = body.api_key.strip()
     if not key.startswith("sk-ant-"):
         raise HTTPException(
@@ -183,9 +232,10 @@ async def update_claude_config(
 
 
 @router.post("/claude-configs/{team}/test", response_model=ClaudeConfigTestResult)
-async def test_claude_config(team: Team, admin: AdminUser, db: DbSession) -> ClaudeConfigTestResult:
+async def test_claude_config(team: Team, admin: AnyAdminUser, db: DbSession) -> ClaudeConfigTestResult:
     """Tests the currently-saved key for `team` — a minimal Anthropic call
     (max_tokens=1), never logging or returning the key itself."""
+    _require_own_team(admin, team)
     config = await claude_config_service.get_active_config(db, team)
     if config is None:
         return ClaudeConfigTestResult(success=False, message="Claude API is not configured for this team.")
@@ -195,25 +245,28 @@ async def test_claude_config(team: Team, admin: AdminUser, db: DbSession) -> Cla
 
 
 @router.get("/usage/by-team", response_model=TeamUsageSummary)
-async def usage_by_team(admin: AdminUser, db: DbSession) -> TeamUsageSummary:
+async def usage_by_team(admin: AnyAdminUser, db: DbSession) -> TeamUsageSummary:
     """Team-level extraction usage from VisionCore's own api_usage table —
     distinct from GET /admin/usage below, which is Anthropic's org-wide
     official report and has no concept of team. Only successful extractions
     are counted (cost_usd/tokens are only populated on success — see
     pipeline.py), matching how the existing per-tag usage rows are recorded.
+    A Branch Admin gets back only their own team's row — enforced by the
+    WHERE clause below, not by filtering the response afterward.
     """
-    rows = (await db.execute(
-        select(
-            ApiUsage.team,
-            func.count().label("extractions"),
-            func.coalesce(func.sum(ApiUsage.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(ApiUsage.output_tokens), 0).label("output_tokens"),
-            func.coalesce(func.sum(ApiUsage.cost_usd), 0.0).label("cost_usd"),
-        )
-        .where(ApiUsage.success.is_(True))
-        .group_by(ApiUsage.team)
-    )).all()
+    scope = team_scope(admin)
+    query = select(
+        ApiUsage.team,
+        func.count().label("extractions"),
+        func.coalesce(func.sum(ApiUsage.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(ApiUsage.output_tokens), 0).label("output_tokens"),
+        func.coalesce(func.sum(ApiUsage.cost_usd), 0.0).label("cost_usd"),
+    ).where(ApiUsage.success.is_(True))
+    if scope is not None:
+        query = query.where(ApiUsage.team == scope)
+    rows = (await db.execute(query.group_by(ApiUsage.team))).all()
     by_team = {r.team: r for r in rows}
+    teams = [scope] if scope is not None else list(Team)
     return TeamUsageSummary(teams=[
         TeamUsageRow(
             team=team,
@@ -225,12 +278,15 @@ async def usage_by_team(admin: AdminUser, db: DbSession) -> TeamUsageSummary:
             ),
             cost_usd=round(float(by_team[team].cost_usd), 6) if team in by_team else 0.0,
         )
-        for team in Team
+        for team in teams
     ])
 
 
 # Claude usage dashboard — sourced entirely from Anthropic's official
 # Usage & Cost Admin API. No local PostgreSQL usage records are read here.
+# Overall Admin only: this is one org-wide report against a single Admin API
+# key, with no per-team breakdown Anthropic's API can provide — GET
+# /admin/usage/by-team above is the team-scoped equivalent branch admins use.
 
 @router.get("/usage", response_model=ClaudeUsageSummary)
 async def usage(
@@ -292,7 +348,8 @@ async def usage(
 # endpoint for the account's actual balance, so an admin records what was
 # purchased (as top-ups, never overwritten), and the app tracks Anthropic's
 # real usage against it via services/org_credits.py. Never Anthropic's own
-# balance figure — always labelled "Estimated" to the admin.
+# balance figure — always labelled "Estimated" to the admin. Overall Admin
+# only: one whole-org balance, no per-team breakdown exists or is meaningful.
 
 def _org_credits_out(
     row: OrgCredits | None, tracked_usage_usd: float = 0.0, usage_error: str | None = None
@@ -354,18 +411,47 @@ async def top_up_org_credits(
 
 
 @router.get("/stats", response_model=AdminStats)
-async def stats(admin: AdminUser, db: DbSession) -> AdminStats:
+async def stats(admin: AnyAdminUser, db: DbSession) -> AdminStats:
+    scope = team_scope(admin)
+
     async def count(model, *where):
         return int(await db.scalar(
             select(func.count()).select_from(model).where(*where) if where
             else select(func.count()).select_from(model)
         ) or 0)
 
+    if scope is None:
+        total_tags = await count(AssetTag)
+        total_uploads = await count(Activity, Activity.action == ActivityAction.UPLOAD)
+        total_downloads = await count(Activity, Activity.action == ActivityAction.DOWNLOAD)
+    else:
+        # AssetTag/Activity carry no direct team column (AssetTag can be
+        # shared across teams by design — see app/models/tag.py; Activity is
+        # keyed by user_id only) — join through the owning user's team
+        # instead, same attribution history.py/pipeline.py already use.
+        total_tags = int(await db.scalar(
+            select(func.count()).select_from(AssetTag)
+            .join(User, User.id == AssetTag.created_by_id)
+            .where(User.team == scope)
+        ) or 0)
+        total_uploads = int(await db.scalar(
+            select(func.count()).select_from(Activity)
+            .join(User, User.id == Activity.user_id)
+            .where(Activity.action == ActivityAction.UPLOAD, User.team == scope)
+        ) or 0)
+        total_downloads = int(await db.scalar(
+            select(func.count()).select_from(Activity)
+            .join(User, User.id == Activity.user_id)
+            .where(Activity.action == ActivityAction.DOWNLOAD, User.team == scope)
+        ) or 0)
+
+    user_where = () if scope is None else (User.team == scope,)
+    batch_where = () if scope is None else (Batch.team == scope,)
     return AdminStats(
-        total_users=await count(User),
-        active_users=await count(User, User.is_active.is_(True)),
-        total_tags=await count(AssetTag),
-        total_batches=await count(Batch),
-        total_uploads=await count(Activity, Activity.action == ActivityAction.UPLOAD),
-        total_downloads=await count(Activity, Activity.action == ActivityAction.DOWNLOAD),
+        total_users=await count(User, *user_where),
+        active_users=await count(User, User.is_active.is_(True), *user_where),
+        total_tags=total_tags,
+        total_batches=await count(Batch, *batch_where),
+        total_uploads=total_uploads,
+        total_downloads=total_downloads,
     )
