@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.models.claude_config import Team
+
 
 class ClaudeModelUsage(BaseModel):
     model: str
@@ -79,3 +81,37 @@ class AdminStats(BaseModel):
     total_batches: int
     total_uploads: int
     total_downloads: int
+
+
+class ClaudeConfigOut(BaseModel):
+    """Never carries the real key — only a masked preview, or null when the
+    team has no configuration at all yet. See app/services/claude_config.py."""
+    team: Team
+    masked_key: str | None
+    status: str  # "Configured" | "Not Configured"
+    updated_at: datetime | None
+
+
+class ClaudeConfigUpdate(BaseModel):
+    api_key: str = Field(min_length=16, max_length=200)
+
+
+class ClaudeConfigTestResult(BaseModel):
+    success: bool
+    message: str
+
+
+class TeamUsageRow(BaseModel):
+    team: Team
+    extractions: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost_usd: float
+
+
+class TeamUsageSummary(BaseModel):
+    """Team-level usage from VisionCore's own api_usage table — distinct
+    from ClaudeUsageSummary above, which is Anthropic's org-wide official
+    report and has no concept of team."""
+    teams: list[TeamUsageRow]

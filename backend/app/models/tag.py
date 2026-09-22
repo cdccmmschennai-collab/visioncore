@@ -27,9 +27,20 @@ class AssetTag(Base, TimestampMixin):
     catches and reports as a duplicate rather than a failure.
     """
     __tablename__ = "asset_tags"
+    __table_args__ = (
+        # Deferrable so app/services/sync_client.py can replay a page
+        # containing a chain of tag_number edits/swaps in one transaction
+        # (checked at COMMIT there) while every other write path — e.g.
+        # pipeline.py's flush()-based duplicate detection — keeps today's
+        # immediate check, since only sync_client opts into deferring it.
+        UniqueConstraint(
+            "tag_number", name="uq_asset_tags_tag_number",
+            deferrable=True, initially="IMMEDIATE",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    tag_number: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    tag_number: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     description: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # Claude's untouched answer — never overwritten, so an audit can always

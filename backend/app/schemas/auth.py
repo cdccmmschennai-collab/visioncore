@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
 
+from app.models.claude_config import Team
 from app.models.user import UserRole
 from app.schemas.common import ORMModel
 
@@ -18,6 +19,7 @@ class UserOut(ORMModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole
+    team: Team
     is_active: bool
     last_login_at: datetime | None = None
     created_at: datetime
@@ -50,12 +52,14 @@ class UserCreate(BaseModel):
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=128)
     role: UserRole = UserRole.USER
+    team: Team = Team.CHENNAI
 
 
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=128)
     role: UserRole | None = None
+    team: Team | None = None
     is_active: bool | None = None
 
 

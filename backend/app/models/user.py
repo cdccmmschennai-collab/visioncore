@@ -5,6 +5,7 @@ from sqlalchemy import Boolean, DateTime, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
+from app.models.claude_config import Team
 
 
 class UserRole(str, enum.Enum):
@@ -27,6 +28,13 @@ class User(Base, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Which Claude API configuration (app/models/claude_config.py) this
+    # user's extractions route through — never inferred from username, only
+    # ever this column. See app/services/ai_extractor.py.
+    team: Mapped[Team] = mapped_column(
+        Enum(Team, name="claude_config_team", values_callable=lambda e: [m.value for m in e]),
+        default=Team.CHENNAI, server_default=Team.CHENNAI.value, nullable=False,
+    )
 
     batches = relationship("Batch", back_populates="user", cascade="all, delete-orphan")
     activities = relationship("Activity", back_populates="user", cascade="all, delete-orphan")

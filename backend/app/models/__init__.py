@@ -1,6 +1,7 @@
 """Import every model so Alembic's autogenerate and Base.metadata see them all."""
 from app.models.activity import Activity, ActivityAction
 from app.models.batch import Batch, BatchStatus
+from app.models.claude_config import ClaudeApiConfig, Team
 from app.models.org_credits import OrgCredits
 from app.models.sync_cursor import SyncCursor
 from app.models.tag import AssetTag, BatchItem, ItemStatus, TagImage
@@ -10,6 +11,7 @@ from app.models.user import User, UserRole
 __all__ = [
     "Activity", "ActivityAction",
     "Batch", "BatchStatus",
+    "ClaudeApiConfig", "Team",
     "OrgCredits",
     "SyncCursor",
     "AssetTag", "BatchItem", "ItemStatus", "TagImage",

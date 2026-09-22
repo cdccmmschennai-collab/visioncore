@@ -2,12 +2,15 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import Modal from '@/components/Modal'
 import Spinner from '@/components/Spinner'
 import { api } from '@/api/client'
-import type { AdminStats, ClaudeUsageSummary, OrgCredits, User } from '@/api/types'
+import type {
+  AdminStats, ClaudeConfig, ClaudeUsageSummary, OrgCredits, Team, TeamUsageSummary, User,
+} from '@/api/types'
+import { TEAMS } from '@/api/types'
 import { formatNumber } from '@/utils/filename'
 import { useAuth } from '@/store/AuthContext'
 import { useToast } from '@/store/ToastContext'
 
-type Tab = 'usage' | 'users'
+type Tab = 'usage' | 'users' | 'claude'
 
 //: How often the Claude usage card re-fetches from the backend in the
 //: background, in addition to the manual Refresh button.
@@ -43,6 +46,16 @@ export default function Admin() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [resetFor, setResetFor] = useState<User | null>(null)
+
+  // Claude API Settings (per-team keys) — Admin-only, its own load lifecycle.
+  const [claudeConfigs, setClaudeConfigs] = useState<ClaudeConfig[]>([])
+  const [claudeConfigsLoading, setClaudeConfigsLoading] = useState(true)
+  const [updateKeyFor, setUpdateKeyFor] = useState<Team | null>(null)
+
+  // Team-level usage (VisionCore's own records) — shown alongside the
+  // existing Anthropic-official usage card, not replacing it.
+  const [teamUsage, setTeamUsage] = useState<TeamUsageSummary | null>(null)
+  const [teamUsageLoading, setTeamUsageLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -82,6 +95,28 @@ export default function Admin() {
     }
   }, [])
 
+  const loadClaudeConfigs = useCallback(async () => {
+    setClaudeConfigsLoading(true)
+    try {
+      setClaudeConfigs(await api.listClaudeConfigs())
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not load Claude API settings.')
+    } finally {
+      setClaudeConfigsLoading(false)
+    }
+  }, [toast])
+
+  const loadTeamUsage = useCallback(async () => {
+    setTeamUsageLoading(true)
+    try {
+      setTeamUsage(await api.usageByTeam())
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not load team usage.')
+    } finally {
+      setTeamUsageLoading(false)
+    }
+  }, [toast])
+
   const submitTopUp = async (event: FormEvent) => {
     event.preventDefault()
     const parsed = Number(topUpInput)
@@ -107,11 +142,14 @@ export default function Admin() {
   useEffect(() => {
     void loadUsage()
     void loadOrgCredits()
+    void loadTeamUsage()
     const id = setInterval(() => {
-      void loadUsage(); void loadOrgCredits()
+      void loadUsage(); void loadOrgCredits(); void loadTeamUsage()
     }, USAGE_REFRESH_INTERVAL_MS)
     return () => clearInterval(id)
-  }, [loadUsage, loadOrgCredits])
+  }, [loadUsage, loadOrgCredits, loadTeamUsage])
+
+  useEffect(() => { void loadClaudeConfigs() }, [loadClaudeConfigs])
 
   const toggleActive = async (target: User) => {
     try {
@@ -133,6 +171,16 @@ export default function Admin() {
     }
   }
 
+  const changeTeam = async (target: User, team: Team) => {
+    try {
+      const updated = await api.updateUser(target.id, { team })
+      setUsers((list) => list.map((u) => (u.id === updated.id ? updated : u)))
+      toast.success(`${updated.username} is now on ${team}.`)
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not change that team.')
+    }
+  }
+
   if (loading) {
     return (
       <div className="page">
@@ -149,7 +197,7 @@ export default function Admin() {
           <h1>Admin</h1>
         </div>
         <div className="tabs" role="tablist">
-          {(['usage', 'users'] as const).map((option) => (
+          {(['usage', 'users', 'claude'] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -158,7 +206,7 @@ export default function Admin() {
               className={`tab${tab === option ? ' tab-active' : ''}`}
               onClick={() => setTab(option)}
             >
-              {option === 'usage' ? 'Claude usage' : 'Users'}
+              {option === 'usage' ? 'Claude usage' : option === 'users' ? 'Users' : 'Claude API Settings'}
             </button>
           ))}
         </div>
@@ -282,6 +330,56 @@ export default function Admin() {
           <section className="card stack gap-16">
             <div className="card-head" style={{ marginBottom: 0 }}>
               <div className="stack gap-4">
+                <h3>Claude Usage by Team</h3>
+                <span className="muted">
+                  From VisionCore's own extraction records — separates the single Anthropic
+                  account's usage above by which team's Claude API key each extraction used.
+                </span>
+              </div>
+              <button
+                type="button" className="btn btn-sm"
+                onClick={() => void loadTeamUsage()} disabled={teamUsageLoading}
+              >
+                {teamUsageLoading ? <Spinner size={14} /> : null}
+                {teamUsageLoading ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
+
+            {teamUsageLoading && !teamUsage && (
+              <div className="row gap-8"><Spinner size={20} label="Loading team usage…" /></div>
+            )}
+
+            {teamUsage && (
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Team</th>
+                      <th>Extractions</th>
+                      <th>Input Tokens</th>
+                      <th>Output Tokens</th>
+                      <th>Cost (USD)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {teamUsage.teams.map((row) => (
+                      <tr key={row.team}>
+                        <td><strong>{row.team}</strong></td>
+                        <td>{formatNumber(row.extractions)}</td>
+                        <td>{formatNumber(row.input_tokens)}</td>
+                        <td>{formatNumber(row.output_tokens)}</td>
+                        <td>${row.cost_usd.toFixed(4)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section className="card stack gap-16">
+            <div className="card-head" style={{ marginBottom: 0 }}>
+              <div className="stack gap-4">
                 <h3>Organization Credits</h3>
                 <span className="muted">
                   <strong>Estimated Balance</strong> = credits you've added below, minus
@@ -393,6 +491,7 @@ export default function Admin() {
                   <th>Name</th>
                   <th>Email</th>
                   <th style={{ width: 130 }}>Role</th>
+                  <th style={{ width: 130 }}>Team</th>
                   <th style={{ width: 100 }}>Status</th>
                   <th style={{ width: 210 }}>Actions</th>
                 </tr>
@@ -415,6 +514,16 @@ export default function Admin() {
                         >
                           <option value="user">User</option>
                           <option value="admin">Admin</option>
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          className="select"
+                          value={row.team}
+                          onChange={(event) => changeTeam(row, event.target.value as Team)}
+                          aria-label={`Team for ${row.username}`}
+                        >
+                          {TEAMS.map((team) => <option key={team} value={team}>{team}</option>)}
                         </select>
                       </td>
                       <td>
@@ -446,12 +555,47 @@ export default function Admin() {
         </section>
       )}
 
+      {tab === 'claude' && (
+        <section className="stack gap-16">
+          <div className="row gap-12">
+            <h3>Claude API Settings</h3>
+            <span className="spacer" />
+            <button type="button" className="btn btn-sm" onClick={() => void loadClaudeConfigs()} disabled={claudeConfigsLoading}>
+              {claudeConfigsLoading ? <Spinner size={14} /> : null}
+              {claudeConfigsLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+          <p className="muted" style={{ margin: 0 }}>
+            Each team's extractions use only its own Claude API key — the full key is never sent
+            to the browser; only a masked preview is shown below.
+          </p>
+
+          {claudeConfigsLoading && claudeConfigs.length === 0 && (
+            <div className="row gap-8"><Spinner size={20} label="Loading Claude API settings…" /></div>
+          )}
+
+          <div className="stack gap-12">
+            {claudeConfigs.map((config) => (
+              <ClaudeConfigCard key={config.team} config={config} onUpdateKey={() => setUpdateKeyFor(config.team)} />
+            ))}
+          </div>
+        </section>
+      )}
+
       <CreateUserModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={(created) => { setUsers((list) => [created, ...list]); setCreateOpen(false) }}
       />
       <ResetPasswordModal user={resetFor} onClose={() => setResetFor(null)} />
+      <UpdateClaudeKeyModal
+        team={updateKeyFor}
+        onClose={() => setUpdateKeyFor(null)}
+        onUpdated={(updated) => {
+          setClaudeConfigs((list) => list.map((c) => (c.team === updated.team ? updated : c)))
+          setUpdateKeyFor(null)
+        }}
+      />
     </div>
   )
 }
@@ -480,6 +624,7 @@ function CreateUserModal({
   const toast = useToast()
   const [form, setForm] = useState({
     username: '', password: '', full_name: '', email: '', role: 'user' as 'admin' | 'user',
+    team: 'CHENNAI' as Team,
   })
   const [busy, setBusy] = useState(false)
 
@@ -493,9 +638,10 @@ function CreateUserModal({
         full_name: form.full_name.trim() || null,
         email: form.email.trim() || null,
         role: form.role,
+        team: form.team,
       })
       toast.success(`Created ${created.username}.`)
-      setForm({ username: '', password: '', full_name: '', email: '', role: 'user' })
+      setForm({ username: '', password: '', full_name: '', email: '', role: 'user', team: 'CHENNAI' })
       onCreated(created)
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : 'Could not create that user.')
@@ -547,6 +693,15 @@ function CreateUserModal({
           >
             <option value="user">User</option>
             <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="new-team">Team</label>
+          <select
+            id="new-team" className="select" value={form.team}
+            onChange={(e) => setForm((f) => ({ ...f, team: e.target.value as Team }))}
+          >
+            {TEAMS.map((team) => <option key={team} value={team}>{team}</option>)}
           </select>
         </div>
         <div className="row gap-8">
@@ -607,6 +762,107 @@ function ResetPasswordModal({ user, onClose }: { user: User | null; onClose: () 
           <button type="submit" className="btn btn-primary" disabled={busy || password.length < 8}>
             {busy ? <Spinner size={14} /> : null}
             {busy ? 'Resetting…' : 'Reset password'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function ClaudeConfigCard({ config, onUpdateKey }: { config: ClaudeConfig; onUpdateKey: () => void }) {
+  const toast = useToast()
+  const [testing, setTesting] = useState(false)
+  const [lastResult, setLastResult] = useState<{ success: boolean; message: string } | null>(null)
+
+  const test = async () => {
+    setTesting(true)
+    setLastResult(null)
+    try {
+      const result = await api.testClaudeConfig(config.team)
+      setLastResult(result)
+      if (!result.success) toast.error(result.message)
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not test that connection.')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <div className="card stack gap-8">
+      <div className="card-head" style={{ marginBottom: 0 }}>
+        <div className="stack gap-4">
+          <h3>{config.team}</h3>
+          <span className="muted">API Key: {config.masked_key ?? 'Not configured'}</span>
+        </div>
+        <span className={`chip ${config.status === 'Configured' ? 'chip-confirmed' : 'chip-danger'}`}>
+          {config.status}
+        </span>
+      </div>
+      {lastResult && (
+        <span className={lastResult.success ? 'muted' : 'stat-danger'} style={{ fontSize: 13 }}>
+          {lastResult.message}
+        </span>
+      )}
+      <div className="row gap-8">
+        <button type="button" className="btn btn-sm" onClick={onUpdateKey}>Update Key</button>
+        <button
+          type="button" className="btn btn-sm" onClick={() => void test()}
+          disabled={testing || config.status !== 'Configured'}
+        >
+          {testing ? <Spinner size={14} /> : null}
+          {testing ? 'Testing…' : 'Test Connection'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function UpdateClaudeKeyModal({
+  team, onClose, onUpdated,
+}: { team: Team | null; onClose: () => void; onUpdated: (config: ClaudeConfig) => void }) {
+  const toast = useToast()
+  const [apiKey, setApiKey] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!team) return
+    setBusy(true)
+    try {
+      const updated = await api.updateClaudeConfig(team, apiKey.trim())
+      toast.success(`Updated the Claude API key for ${team}.`)
+      setApiKey('')
+      onUpdated(updated)
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : 'Could not update that key.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal open={team !== null} title={team ? `Update Claude API key — ${team}` : 'Update Claude API key'} onClose={onClose}>
+      <form onSubmit={submit} className="stack gap-16">
+        <p className="muted" style={{ margin: 0 }}>
+          Extractions for users on the {team} team will use this key. It's encrypted before being
+          stored and is never shown again once saved.
+        </p>
+        <div className="field">
+          <label htmlFor="claude-key">Claude API key</label>
+          <input
+            id="claude-key" className="input" required minLength={16}
+            placeholder="sk-ant-api03-…"
+            value={apiKey} onChange={(event) => setApiKey(event.target.value)}
+            autoComplete="off"
+          />
+        </div>
+        <div className="row gap-8">
+          <span className="spacer" />
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={busy || apiKey.trim().length < 16}>
+            {busy ? <Spinner size={14} /> : null}
+            {busy ? 'Saving…' : 'Save key'}
           </button>
         </div>
       </form>

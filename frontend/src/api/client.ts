@@ -1,8 +1,9 @@
 import { API_V1 } from '@/config'
 import type { StagedFile } from '@/utils/upload'
 import type {
-  AdminStats, AssetTag, Batch, BatchItem, ClaudeUsageSummary, ExtractedImage, ExtractionPayload,
-  HistoryRow, OrgCredits, Page, SearchResult, TokenResponse, UploadResponse, User,
+  AdminStats, AssetTag, Batch, BatchItem, ClaudeConfig, ClaudeConfigTestResult, ClaudeUsageSummary,
+  ExtractedImage, ExtractionPayload, HistoryRow, OrgCredits, Page, SearchResult, Team, TeamUsageSummary,
+  TokenResponse, UploadResponse, User,
 } from './types'
 
 const ACCESS_KEY = 'visioncore.access'
@@ -295,9 +296,9 @@ export const api = {
   listUsers: () => request<User[]>('/admin/users'),
   createUser: (body: {
     username: string; password: string; email?: string | null
-    full_name?: string | null; role: 'admin' | 'user'
+    full_name?: string | null; role: 'admin' | 'user'; team: Team
   }) => request<User>('/admin/users', { method: 'POST', body }),
-  updateUser: (id: number, body: Partial<Pick<User, 'email' | 'full_name' | 'role' | 'is_active'>>) =>
+  updateUser: (id: number, body: Partial<Pick<User, 'email' | 'full_name' | 'role' | 'team' | 'is_active'>>) =>
     request<User>(`/admin/users/${id}`, { method: 'PATCH', body }),
   resetUserPassword: (id: number, new_password: string) =>
     request<{ message: string }>(`/admin/users/${id}/reset-password`, {
@@ -307,8 +308,16 @@ export const api = {
   deactivateUser: (id: number) =>
     request<{ message: string }>(`/admin/users/${id}`, { method: 'DELETE' }),
   usage: (days = 30) => request<ClaudeUsageSummary>(`/admin/usage?days=${days}`),
+  usageByTeam: () => request<TeamUsageSummary>('/admin/usage/by-team'),
   orgCredits: () => request<OrgCredits>('/admin/org-credits'),
   topUpOrgCredits: (top_up_usd: number) =>
     request<OrgCredits>('/admin/org-credits', { method: 'PATCH', body: { top_up_usd } }),
   stats: () => request<AdminStats>('/admin/stats'),
+
+  // ── Claude API team configuration (Admin-only) ─────────────────────────────
+  listClaudeConfigs: () => request<ClaudeConfig[]>('/admin/claude-configs'),
+  updateClaudeConfig: (team: Team, api_key: string) =>
+    request<ClaudeConfig>(`/admin/claude-configs/${team}`, { method: 'PUT', body: { api_key } }),
+  testClaudeConfig: (team: Team) =>
+    request<ClaudeConfigTestResult>(`/admin/claude-configs/${team}/test`, { method: 'POST' }),
 }
