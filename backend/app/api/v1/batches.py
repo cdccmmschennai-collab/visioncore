@@ -139,7 +139,12 @@ async def _load_batch(db, batch_id: int, user) -> Batch:
     )
     if batch is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "That batch no longer exists.")
-    if batch.user_id != user.id and user.role != UserRole.ADMIN:
+    allowed = (
+        user.role == UserRole.ADMIN
+        or batch.user_id == user.id
+        or (user.role == UserRole.BRANCH_ADMIN and batch.team == user.team)
+    )
+    if not allowed:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "That batch belongs to another user.")
     return batch
 
@@ -391,7 +396,10 @@ async def list_batches_by_status(
     )
     count_query = select(func.count()).select_from(Batch).where(Batch.status.in_(statuses))
 
-    if user.role != UserRole.ADMIN:
+    if user.role == UserRole.BRANCH_ADMIN:
+        query = query.where(Batch.team == user.team)
+        count_query = count_query.where(Batch.team == user.team)
+    elif user.role != UserRole.ADMIN:
         query = query.where(Batch.user_id == user.id)
         count_query = count_query.where(Batch.user_id == user.id)
 
@@ -434,7 +442,10 @@ async def list_extracted_images(
         .join(Batch, Batch.id == BatchItem.batch_id)
         .where(BatchItem.status == ItemStatus.COMPLETED)
     )
-    if user.role != UserRole.ADMIN:
+    if user.role == UserRole.BRANCH_ADMIN:
+        query = query.where(Batch.team == user.team)
+        count_query = count_query.where(Batch.team == user.team)
+    elif user.role != UserRole.ADMIN:
         query = query.where(Batch.user_id == user.id)
         count_query = count_query.where(Batch.user_id == user.id)
 
@@ -533,7 +544,7 @@ async def get_batch_image(
     """
     row = (
         await db.execute(
-            select(TagImage, Batch.user_id, AssetTag.created_by_id)
+            select(TagImage, Batch.user_id, Batch.team, AssetTag.created_by_id)
             .join(BatchItem, BatchItem.id == TagImage.item_id)
             .join(Batch, Batch.id == BatchItem.batch_id)
             .outerjoin(AssetTag, AssetTag.id == BatchItem.asset_tag_id)
@@ -542,9 +553,14 @@ async def get_batch_image(
     ).first()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "That photo isn't part of this batch.")
-    image, batch_owner_id, tag_creator_id = row
+    image, batch_owner_id, batch_team, tag_creator_id = row
 
-    if user.role != UserRole.ADMIN and user.id not in (batch_owner_id, tag_creator_id):
+    allowed = (
+        user.role == UserRole.ADMIN
+        or user.id in (batch_owner_id, tag_creator_id)
+        or (user.role == UserRole.BRANCH_ADMIN and batch_team == user.team)
+    )
+    if not allowed:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "That photo belongs to another user's tag."
         )
@@ -628,6 +644,8 @@ async def list_batches(user: CurrentUser, db: DbSession, limit: int = 20) -> lis
         .order_by(Batch.created_at.desc())
         .limit(min(limit, 100))
     )
-    if user.role != UserRole.ADMIN:
+    if user.role == UserRole.BRANCH_ADMIN:
+        query = query.where(Batch.team == user.team)
+    elif user.role != UserRole.ADMIN:
         query = query.where(Batch.user_id == user.id)
     return [_batch_out(b) for b in (await db.scalars(query)).all()]

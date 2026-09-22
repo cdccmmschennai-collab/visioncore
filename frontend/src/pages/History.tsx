@@ -32,7 +32,7 @@ const STATUS_FILTERS: { label: string; action: string }[] = [
 ]
 
 export default function History() {
-  const { isAdmin } = useAuth()
+  const { isAdmin, isOverallAdmin } = useAuth()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
 
@@ -399,7 +399,7 @@ export default function History() {
                           ) : (
                             <span className="muted">—</span>
                           )}
-                          {isAdmin && row.status === 'Completed' && row.asset_tag_id && (
+                          {isOverallAdmin && row.status === 'Completed' && row.asset_tag_id && (
                             <button
                               type="button"
                               className="btn btn-sm btn-danger"

@@ -1,6 +1,9 @@
-export type Role = 'admin' | 'user'
-export type Team = 'CHENNAI' | 'HYD' | 'QA'
-export const TEAMS: Team[] = ['CHENNAI', 'HYD', 'QA']
+// 'admin' = Overall Admin (unchanged meaning); 'branch_admin' = scoped to
+// exactly its own team (see User.team below); enforced by the backend, not
+// just the frontend — see backend/app/core/deps.py's AnyAdminUser.
+export type Role = 'admin' | 'branch_admin' | 'user'
+export type Team = 'CHENNAI' | 'HYDERABAD' | 'QATAR'
+export const TEAMS: Team[] = ['CHENNAI', 'HYDERABAD', 'QATAR']
 export type Quality = 'Confirmed' | 'Verify'
 export type ItemStatus =
   | 'uploaded' | 'extracting' | 'processing' | 'retrying' | 'completed' | 'failed' | 'duplicate'

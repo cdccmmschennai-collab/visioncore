@@ -21,7 +21,7 @@ interface Query {
 }
 
 export default function Search() {
-  const { isAdmin } = useAuth()
+  const { isOverallAdmin } = useAuth()
   const toast = useToast()
 
   const [field, setField] = useState(SEARCH_FIELDS[0].value)
@@ -178,7 +178,7 @@ export default function Search() {
                     <th>User</th>
                     <th style={{ width: 110 }}>View Details</th>
                     <th style={{ width: 110 }}>View Photo</th>
-                    {isAdmin && <th style={{ width: 90 }}>Action</th>}
+                    {isOverallAdmin && <th style={{ width: 90 }}>Action</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -231,7 +231,7 @@ export default function Search() {
                           <span className="muted">No Photo Available</span>
                         )}
                       </td>
-                      {isAdmin && (
+                      {isOverallAdmin && (
                         <td>
                           {row.batch_id ? (
                             <button

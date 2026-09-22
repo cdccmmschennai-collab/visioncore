@@ -83,13 +83,23 @@ async def list_history(
     count_query = (
         select(func.count())
         .select_from(Activity)
+        .join(User, User.id == Activity.user_id, isouter=True)
         .join(AssetTag, AssetTag.tag_number == Activity.tag_number, isouter=True)
         .join(upload_batch, upload_batch.id == upload_batch_id, isouter=True)
         .where(Activity.action.in_(VISIBLE_ACTIONS), record_exists)
     )
 
-    # Non-admins only ever see their own rows, regardless of the flag.
-    if user.role != UserRole.ADMIN or mine_only:
+    # Overall Admin (not mine_only): unrestricted. Branch Admin (not
+    # mine_only): their own branch only — enforced in the backend query, not
+    # just hidden in the UI (see app/core/deps.py's team_scope). A plain
+    # user, or anyone with mine_only checked, only ever sees their own rows.
+    if mine_only:
+        query = query.where(Activity.user_id == user.id)
+        count_query = count_query.where(Activity.user_id == user.id)
+    elif user.role == UserRole.BRANCH_ADMIN:
+        query = query.where(User.team == user.team)
+        count_query = count_query.where(User.team == user.team)
+    elif user.role != UserRole.ADMIN:
         query = query.where(Activity.user_id == user.id)
         count_query = count_query.where(Activity.user_id == user.id)
 

@@ -2,8 +2,8 @@ import { API_V1 } from '@/config'
 import type { StagedFile } from '@/utils/upload'
 import type {
   AdminStats, AssetTag, Batch, BatchItem, ClaudeConfig, ClaudeConfigTestResult, ClaudeUsageSummary,
-  ExtractedImage, ExtractionPayload, HistoryRow, OrgCredits, Page, SearchResult, Team, TeamUsageSummary,
-  TokenResponse, UploadResponse, User,
+  ExtractedImage, ExtractionPayload, HistoryRow, OrgCredits, Page, Role, SearchResult, Team,
+  TeamUsageSummary, TokenResponse, UploadResponse, User,
 } from './types'
 
 const ACCESS_KEY = 'visioncore.access'
@@ -296,7 +296,7 @@ export const api = {
   listUsers: () => request<User[]>('/admin/users'),
   createUser: (body: {
     username: string; password: string; email?: string | null
-    full_name?: string | null; role: 'admin' | 'user'; team: Team
+    full_name?: string | null; role: Role; team: Team
   }) => request<User>('/admin/users', { method: 'POST', body }),
   updateUser: (id: number, body: Partial<Pick<User, 'email' | 'full_name' | 'role' | 'team' | 'is_active'>>) =>
     request<User>(`/admin/users/${id}`, { method: 'PATCH', body }),

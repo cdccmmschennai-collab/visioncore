@@ -73,15 +73,22 @@ async def list_tags(
 ) -> Page[AssetTagOut]:
     """Backs the Home dashboard's totals/recent list and the tag search box.
 
-    Non-admins see only tags they personally extracted (`created_by_id`) —
-    this is what keeps a new user's dashboard at zero and stops one user's
-    totals from including work another user did on a shared tag. Admins get
-    the unscoped, org-wide view.
+    A plain user sees only tags they personally extracted (`created_by_id`)
+    — this is what keeps a new user's dashboard at zero and stops one user's
+    totals from including work another user did on a shared tag. A Branch
+    Admin sees every tag created by someone on their own team (AssetTag has
+    no direct team column — it's a shared, de-duplicated record by design,
+    see app/models/tag.py — so this resolves via the creator's team). An
+    Overall Admin gets the unscoped, org-wide view.
     """
     query = select(AssetTag)
     count_query = select(func.count()).select_from(AssetTag)
 
-    if user.role != UserRole.ADMIN:
+    if user.role == UserRole.BRANCH_ADMIN:
+        team_user_ids = select(User.id).where(User.team == user.team)
+        query = query.where(AssetTag.created_by_id.in_(team_user_ids))
+        count_query = count_query.where(AssetTag.created_by_id.in_(team_user_ids))
+    elif user.role != UserRole.ADMIN:
         query = query.where(AssetTag.created_by_id == user.id)
         count_query = count_query.where(AssetTag.created_by_id == user.id)
 
@@ -226,8 +233,8 @@ async def download_all_templates(
     so the export can't contain duplicate rows for a tag that was uploaded,
     edited or downloaded more than once.
 
-    Scoped the same way as `list_tags` above: non-admins only ever get tags
-    they personally extracted (`created_by_id`); admins get every tag. Passing
+    Scoped exactly like `list_tags` above (a plain user: their own tags only;
+    a Branch Admin: their whole team's; an Overall Admin: every tag). Passing
     `tag_numbers` (History's per-tag checkboxes) narrows the same query rather
     than changing it, so the "download everything" call every existing caller
     already makes — no `tag_numbers` at all — is untouched.
@@ -239,7 +246,11 @@ async def download_all_templates(
     of the whole day.
     """
     query = select(AssetTag).order_by(AssetTag.tag_number)
-    if user.role != UserRole.ADMIN:
+    if user.role == UserRole.BRANCH_ADMIN:
+        query = query.where(
+            AssetTag.created_by_id.in_(select(User.id).where(User.team == user.team))
+        )
+    elif user.role != UserRole.ADMIN:
         query = query.where(AssetTag.created_by_id == user.id)
     if tag_numbers:
         query = query.where(AssetTag.tag_number.in_(tag_numbers))
