@@ -31,6 +31,7 @@ from app.services.fields import (
     FIELDS,
     NOT_PRESENT,
     normalise_payload,
+    photo_tag_number,
     reconcile_description,
     reconcile_tag_number,
 )
@@ -332,6 +333,9 @@ class ClaudeExtractor:
             raw, final_tag_number, final_description,
             tag_number_quality=tag_number_quality, description_quality=description_quality,
         )
+        # Raw plate reading, kept apart from the reconciled tag_number above
+        # for the Template workbook's ASSET TAG NUMBER column only.
+        payload["photo_tag_number"] = photo_tag_number(raw)
 
         return ExtractionResult(
             payload=payload,

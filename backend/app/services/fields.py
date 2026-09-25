@@ -157,6 +157,18 @@ def reconcile_tag_number(raw: dict, filename_tag_number: str) -> tuple[str, str]
     return photo_value.upper(), QUALITY_VERIFY
 
 
+def photo_tag_number(raw: dict) -> str:
+    """The tag number Claude read off the plate itself, before
+    `reconcile_tag_number` merges it with the filename — "" when none was
+    detected. Stored alongside the payload only so the Template workbook's
+    ASSET TAG NUMBER column can show exactly what the photo said.
+    """
+    raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
+    entry = raw_fields.get("tag_number")
+    value = str(entry.get("value", "") or "").strip() if isinstance(entry, dict) else ""
+    return "" if is_blank(value) else value.upper()
+
+
 #: Set when neither the upload nor a known equipment code could supply a
 #: description and Claude's own read of the nameplate didn't either —
 #: distinct from NOT_PRESENT, which means "this field isn't printed on the

@@ -14,11 +14,12 @@ from app.models import Activity, ActivityAction, AssetTag, BatchItem, ItemStatus
 from app.schemas.common import Message, Page
 from app.schemas.tag import AssetTagOut, SaveTagRequest, SearchResultOut
 from app.services.download_links import ai_excel_download_url, photo_view_url, verify_ai_excel_token
+from app.services.excel_ai import ALREADY_EXTRACTED_NOTE, build_ai_workbook
 from app.services.excel_template import build_template_workbook
 from app.services.fields import normalise_payload, quality_of, value_of
 from app.services.filename_parser import excel_basename, safe_filename
-from app.services.pipeline import generate_workbooks, template_path_columns
-from app.services.storage import remove_files, resolve_stored
+from app.services.pipeline import _read_photo_bytes, generate_workbooks, template_path_columns
+from app.services.storage import ai_output_name, remove_files, resolve_stored
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,21 @@ async def download_all_templates(
     for tag_number, filename in photo_rows:
         photos_by_tag.setdefault(tag_number, []).append(filename)
 
+    # First input filename per tag, keyed by asset_tag_id rather than tag
+    # number, so a tag whose number was taken from the plate (and so no
+    # longer matches its filename) still finds it — source of TAG NUMBER.
+    filename_rows = (
+        await db.execute(
+            select(BatchItem.asset_tag_id, TagImage.original_filename)
+            .join(TagImage, TagImage.item_id == BatchItem.id)
+            .where(BatchItem.asset_tag_id.in_([t.id for t in tags]))
+            .order_by(TagImage.id)
+        )
+    ).all()
+    filename_by_tag_id: dict[int, str] = {}
+    for asset_tag_id, filename in filename_rows:
+        filename_by_tag_id.setdefault(asset_tag_id, filename)
+
     records = []
     for tag in tags:
         input_cell, output_cell = template_path_columns(
@@ -303,6 +319,7 @@ async def download_all_templates(
             "input_photo_url": (
                 photo_view_url(tag.tag_number) if tag.tag_number in photos_by_tag else None
             ),
+            "input_filename": filename_by_tag_id.get(tag.id),
         })
 
     content = build_template_workbook(records)
@@ -477,8 +494,37 @@ async def _download(db, tag: AssetTag, kind: str, user: User | None) -> FileResp
 
 
 @router.get("/{tag_id}/download/ai")
-async def download_ai(tag_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
-    return await _download(db, await _get_tag(db, tag_id), "ai", user)
+async def download_ai(
+    tag_id: int, user: CurrentUser, db: DbSession, already_extracted: bool = False,
+) -> Response:
+    """`already_extracted=true` — used by a Batch Process run for a tag it
+    skipped because an earlier batch had already extracted it — returns a
+    copy built on the fly with an "ALREADY EXTRACTED" banner and a
+    "(Already Extracted)" filename suffix. The stored workbook is untouched.
+    """
+    tag = await _get_tag(db, tag_id)
+    if not already_extracted:
+        return await _download(db, tag, "ai", user)
+
+    photo_names, photo_paths = await _photo_names_and_paths(db, tag.tag_number)
+    content = build_ai_workbook(
+        tag.ai_payload, tag.tag_number, tag.description, photo_names,
+        images=_read_photo_bytes(photo_paths), status_note=ALREADY_EXTRACTED_NOTE,
+    )
+    filename = safe_filename(
+        f"{ai_output_name(excel_basename(tag.tag_number, tag.description)).removesuffix('.xlsx')}"
+        " (Already Extracted).xlsx"
+    )
+    db.add(Activity(
+        user_id=user.id, action=ActivityAction.DOWNLOAD,
+        tag_number=tag.tag_number, description=tag.description,
+        detail="Downloaded AI Output workbook (already extracted)",
+    ))
+    await db.commit()
+    return Response(
+        content=content, media_type=XLSX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/download/ai-link")
