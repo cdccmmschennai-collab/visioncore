@@ -252,9 +252,8 @@ async def process_item(item_id: int, user_id: int) -> None:
 
         await _set_status(session, item, ItemStatus.PROCESSING)
 
-        # The AI's own plate reading wins over the filename when it found one
-        # and it disagrees (see claude_extractor.extract/reconcile_tag_number)
-        # — this is the record's real identity from here on, not item.tag_number.
+        # Always the filename's tag number (see fields.reconcile_tag_number) —
+        # the AI's plate reading never replaces it.
         final_tag_number = value_of(result.payload, "tag_number")
         # Same idea for description: a tag-only upload leaves item.description
         # blank, and claude_extractor's reconcile_description already filled

@@ -11,6 +11,10 @@ interface Props {
   onDownloadTemplate: () => Promise<void>
   onViewPhoto?: () => void
   readOnly?: boolean
+  /** Tag number parsed from the input filename — the source of truth for
+   *  Tag Number. When given, it's shown (and edited/saved) in place of the
+   *  stored one, which on older records may be the AI's plate reading. */
+  fileTagNumber?: string
 }
 
 /** Deep clone so editing never mutates the payload React is rendering from. */
@@ -29,20 +33,32 @@ function emptyField(): FieldValue {
   return { value: '', quality: 'Verify' }
 }
 
+function withFileTag(payload: ExtractionPayload, fileTagNumber?: string): ExtractionPayload {
+  if (!fileTagNumber) return payload
+  return {
+    ...payload,
+    fields: { ...payload.fields, tag_number: { value: fileTagNumber, quality: 'Confirmed' } },
+  }
+}
+
 export default function EditableTable({
-  tag, onSave, onDownloadAi, onDownloadTemplate, onViewPhoto, readOnly = false,
+  tag, onSave, onDownloadAi, onDownloadTemplate, onViewPhoto, readOnly = false, fileTagNumber,
 }: Props) {
+  const finalPayload = useMemo(
+    () => withFileTag(tag.final_payload, fileTagNumber),
+    [tag.final_payload, fileTagNumber],
+  )
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [downloading, setDownloading] = useState<'ai' | 'template' | null>(null)
-  const [draft, setDraft] = useState<ExtractionPayload>(() => clonePayload(tag.final_payload))
+  const [draft, setDraft] = useState<ExtractionPayload>(() => clonePayload(finalPayload))
 
   // A save returns a new revision; re-seed the draft unless the user is mid-edit.
   useEffect(() => {
-    if (!editing) setDraft(clonePayload(tag.final_payload))
-  }, [tag.final_payload, tag.revision, editing])
+    if (!editing) setDraft(clonePayload(finalPayload))
+  }, [finalPayload, tag.revision, editing])
 
-  const source = editing ? draft : tag.final_payload
+  const source = editing ? draft : finalPayload
 
   /** Fields the reviewer has already changed away from the AI's answer. */
   const corrected = useMemo(() => {
@@ -65,12 +81,12 @@ export default function EditableTable({
     }))
 
   const startEdit = () => {
-    setDraft(clonePayload(tag.final_payload))
+    setDraft(clonePayload(finalPayload))
     setEditing(true)
   }
 
   const cancel = () => {
-    setDraft(clonePayload(tag.final_payload))
+    setDraft(clonePayload(finalPayload))
     setEditing(false)
   }
 
@@ -97,7 +113,7 @@ export default function EditableTable({
     <section className="card result-card">
       <div className="card-head">
         <div className="stack gap-4">
-          <span className="tag-code result-tag">{tag.tag_number}</span>
+          <span className="tag-code result-tag">{fileTagNumber || tag.tag_number}</span>
           <span className="muted">{tag.description}</span>
         </div>
         <div className="row gap-8 wrap">

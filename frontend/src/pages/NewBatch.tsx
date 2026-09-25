@@ -839,6 +839,7 @@ export default function NewBatch() {
                     {expandedItems.has(item.id) && (
                       <EditableTable
                         tag={item.asset_tag}
+                        fileTagNumber={item.tag_number}
                         onSave={(payload) => saveTag(item.asset_tag!, payload)}
                         onDownloadAi={() => download(item.asset_tag!, 'ai')}
                         onDownloadTemplate={() => download(item.asset_tag!, 'template')}
