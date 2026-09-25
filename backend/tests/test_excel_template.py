@@ -234,3 +234,17 @@ def test_ai_workbook_already_extracted_banner_only_when_requested():
     # Table layout below is unchanged.
     assert marked["A4"].value == "Field"
     assert marked["A5"].value == "Tag Number"
+
+
+def test_duplicate_highlights_only_its_tag_number_cell():
+    records = [
+        {"payload": empty_payload("T-1", "X"), "ai_payload": {}, "duplicate": True},
+        {"payload": empty_payload("T-2", "X"), "ai_payload": {}},
+    ]
+    ws = load_workbook(BytesIO(build_template_workbook(records))).active
+    headers = [c.value for c in ws[1]]
+    tag_col = headers.index("TAG NUMBER") + 1
+    assert ws.cell(2, tag_col).fill.fgColor.rgb == "FFC6EFCE"
+    others = [ws.cell(2, c).fill.fgColor.rgb for c in range(1, len(headers) + 1) if c != tag_col]
+    assert "FFC6EFCE" not in others
+    assert ws.cell(3, tag_col).fill.fgColor.rgb != "FFC6EFCE"
