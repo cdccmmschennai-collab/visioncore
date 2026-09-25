@@ -135,9 +135,9 @@ export default function NewBatch() {
    * time — same "one file per batch, always current" behaviour the server
    * used to give. */
   const writeConsolidatedCopy = useCallback(
-    async (dir: FSDirectoryHandle, reference: string, tagNumbers: string[]) => {
+    async (dir: FSDirectoryHandle, reference: string, tagNumbers: string[], duplicateTagNumbers: string[]) => {
       try {
-        const blob = await api.fetchConsolidatedBlob(tagNumbers)
+        const blob = await api.fetchConsolidatedBlob(tagNumbers, duplicateTagNumbers)
         await writeFileToFolder(dir, 'Consolidate file', `Consolidated_${reference}.xlsx`, blob)
       } catch (err) {
         warnWriteBackFailure(`consolidated workbook for ${reference}`, err)
@@ -230,8 +230,11 @@ export default function NewBatch() {
         .filter((item) => (item.status === 'completed' || item.status === 'duplicate') && item.asset_tag)
         .map((item) => item.tag_number)
       if (tagNumbers.length === 0) return
+      const duplicateTagNumbers = currentBatch.items
+        .filter((item) => item.status === 'duplicate' && item.asset_tag)
+        .map((item) => item.tag_number)
       try {
-        const blob = await api.fetchConsolidatedBlob(tagNumbers)
+        const blob = await api.fetchConsolidatedBlob(tagNumbers, duplicateTagNumbers)
         const filename = await nextRevisionFilename(dir, 'Consolidate file', `Consolidated_${currentBatch.reference}`)
         await writeFileToFolder(dir, 'Consolidate file', filename, blob)
       } catch (err) {
@@ -314,7 +317,10 @@ export default function NewBatch() {
               const tagNumbers = fresh.items
                 .filter((item) => (item.status === 'completed' || item.status === 'duplicate') && item.asset_tag)
                 .map((item) => item.tag_number)
-              if (tagNumbers.length > 0) void writeConsolidatedCopy(dirForThisBatch, fresh.reference, tagNumbers)
+              const duplicateTagNumbers = fresh.items
+                .filter((item) => item.status === 'duplicate' && item.asset_tag)
+                .map((item) => item.tag_number)
+              if (tagNumbers.length > 0) void writeConsolidatedCopy(dirForThisBatch, fresh.reference, tagNumbers, duplicateTagNumbers)
             }
             // A Batch Process run gets the "File Extraction Completed" summary
             // popup instead of a toast — everything else (normal upload,

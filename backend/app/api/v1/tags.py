@@ -236,6 +236,11 @@ async def download_all_templates(
     to_date: date | None = Query(
         None, description="Only tags extracted on/before this date (History's date-range download)."
     ),
+    duplicate_tag_numbers: list[str] | None = Query(
+        None,
+        description="Tags a Batch Process run found already extracted — their TAG NUMBER "
+                    "cell is highlighted light green in the consolidated file.",
+    ),
 ) -> Response:
     """One consolidated Template workbook, one row per unique asset tag.
 
@@ -323,6 +328,7 @@ async def download_all_templates(
     for asset_tag_id, filename in filename_rows:
         filename_by_tag_id.setdefault(asset_tag_id, filename)
 
+    duplicate_set = set(duplicate_tag_numbers or [])
     records = []
     for tag in tags:
         input_cell, output_cell = template_path_columns(
@@ -338,6 +344,7 @@ async def download_all_templates(
                 photo_view_url(tag.tag_number) if tag.tag_number in photos_by_tag else None
             ),
             "input_filename": filename_by_tag_id.get(tag.id),
+            "duplicate": tag.tag_number in duplicate_set,
         })
 
     content = build_template_workbook(records)

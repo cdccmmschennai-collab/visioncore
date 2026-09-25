@@ -49,6 +49,9 @@ HEADER_FILL = PatternFill("solid", fgColor="FFFFFF00")
 AMBER_FILL = PatternFill("solid", fgColor="FFFFC000")
 #: ASSET TAG NUMBER cell when the photo's tag number disagrees with TAG NUMBER.
 ORANGE_FILL = PatternFill("solid", fgColor="FFFFA500")
+#: TAG NUMBER cell of a Batch Process consolidated row whose tag was a
+#: duplicate (already extracted by an earlier batch) — record["duplicate"].
+LIGHT_GREEN_FILL = PatternFill("solid", fgColor="FFC6EFCE")
 REVIEWER_FONT_COLOR = "FF0070C0"
 HYPERLINK_FONT_COLOR = "FF0563C1"
 
@@ -206,6 +209,8 @@ def _write_asset_tag_row(ws: Worksheet, row_idx: int, serial: int, record: dict)
         # Never on TAG NUMBER — it's taken from the filename, not read.
         if display and field.key != "tag_number" and quality_of(payload, field.key) == QUALITY_VERIFY:
             cell.fill = AMBER_FILL
+        if field.key == "tag_number" and record.get("duplicate"):
+            cell.fill = LIGHT_GREEN_FILL
 
         if field.template_header in WRAP_HEADERS:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
@@ -265,7 +270,8 @@ def _write_hyperlink_cell(ws: Worksheet, row_idx: int, col: int, url: str | None
 
 def build_template_workbook(records: list[dict]) -> bytes:
     """`records` is a list of dicts with keys: payload, ai_payload, and
-    optionally input_filename (source of the TAG NUMBER column).
+    optionally input_filename (source of the TAG NUMBER column) and
+    duplicate (True highlights that row's TAG NUMBER cell light green).
     One row per record — a single tag for a per-tag download, or every tag in a
     batch for the batch-level download.
     """

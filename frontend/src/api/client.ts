@@ -263,9 +263,12 @@ export const api = {
   // as raw bytes instead of a browser download — used to write the Batch
   // Process "Consolidate file" output straight into the picked local folder
   // (see frontend/src/utils/folderAccess.ts).
-  fetchConsolidatedBlob: (tagNumbers: string[]) => {
+  // `duplicateTagNumbers` (already-extracted tags) get their TAG NUMBER
+  // cell highlighted light green in the file.
+  fetchConsolidatedBlob: (tagNumbers: string[], duplicateTagNumbers: string[] = []) => {
     const query = new URLSearchParams()
     tagNumbers.forEach((tagNumber) => query.append('tag_numbers', tagNumber))
+    duplicateTagNumbers.forEach((tagNumber) => query.append('duplicate_tag_numbers', tagNumber))
     return fetchBlob(`/tags/download-all/template?${query}`)
   },
   deleteTag: (id: number) =>
