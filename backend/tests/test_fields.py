@@ -28,11 +28,13 @@ def test_reconcile_tag_number_confirmed_when_plate_agrees():
     assert quality == QUALITY_CONFIRMED
 
 
-def test_reconcile_tag_number_verify_on_mismatch():
-    raw = _raw("tag_number", "12-TAG-9999")
-    tag_number, quality = reconcile_tag_number(raw, "12-TAG-0001")
-    assert tag_number == "12-TAG-9999"
-    assert quality == QUALITY_VERIFY
+def test_reconcile_tag_number_keeps_filename_on_mismatch():
+    """The filename's tag number is authoritative — a different plate
+    reading never replaces it."""
+    raw = _raw("tag_number", "3-4034")
+    tag_number, quality = reconcile_tag_number(raw, "13-4034-BV-0007")
+    assert tag_number == "13-4034-BV-0007"
+    assert quality == QUALITY_CONFIRMED
 
 
 def test_reconcile_description_confirmed_when_upload_supplied_it():

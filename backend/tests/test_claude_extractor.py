@@ -180,9 +180,10 @@ def test_extract_confirms_tag_number_when_plate_reading_agrees_or_is_absent(tmp_
     assert result.payload["fields"]["tag_number"]["quality"] == "Confirmed"
 
 
-def test_extract_flags_tag_number_for_verification_on_mismatch(tmp_path):
-    """Claude's own plate reading disagreeing with the filename is a real
-    doubt — the plate reading wins, but must be marked Verify, not Confirmed."""
+def test_extract_keeps_filename_tag_number_on_mismatch(tmp_path):
+    """The filename is the source of truth for tag_number — a different
+    plate reading never replaces it, and is kept only as photo_tag_number
+    (the Template workbook's ASSET TAG NUMBER)."""
     extractor = ClaudeExtractor(api_key="sk-test-dummy")
     photos = [str(_make_photo(tmp_path))]
 
@@ -196,8 +197,9 @@ def test_extract_flags_tag_number_for_verification_on_mismatch(tmp_path):
     extractor._client.messages.create = fake_create
 
     result = asyncio.run(extractor.extract(photos, "12-TAG-0001", "TEST VALVE"))
-    assert result.payload["fields"]["tag_number"]["value"] == "12-TAG-9999"
-    assert result.payload["fields"]["tag_number"]["quality"] == "Verify"
+    assert result.payload["fields"]["tag_number"]["value"] == "12-TAG-0001"
+    assert result.payload["fields"]["tag_number"]["quality"] == "Confirmed"
+    assert result.payload["photo_tag_number"] == "12-TAG-9999"
 
 
 def test_extract_never_lets_claude_override_an_explicit_description(tmp_path):

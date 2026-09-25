@@ -50,16 +50,25 @@ async def _username_of(db, tag: AssetTag) -> str | None:
     return await db.scalar(select(User.username).where(User.id == tag.created_by_id))
 
 
-async def _photo_names_and_paths(db, tag_number: str) -> tuple[list[str], list[str]]:
+def _photos_of(tag: AssetTag):
+    """Match a tag's input photos by its own id as well as its tag number —
+    the number alone misses them whenever it was taken from the plate (or
+    edited) and so no longer matches the filename-derived
+    BatchItem.tag_number (see pipeline.py's final_tag_number).
+    """
+    return or_(BatchItem.tag_number == tag.tag_number, BatchItem.asset_tag_id == tag.id)
+
+
+async def _photo_names_and_paths(db, tag: AssetTag) -> tuple[list[str], list[str]]:
     rows = (
         await db.execute(
             select(TagImage.original_filename, TagImage.stored_path)
             .join(BatchItem, BatchItem.id == TagImage.item_id)
-            .where(BatchItem.tag_number == tag_number)
+            .where(_photos_of(tag))
             .order_by(TagImage.id)
         )
     ).all()
-    names = [r[0] for r in rows] or [f"{tag_number}.jpg"]
+    names = [r[0] for r in rows] or [f"{tag.tag_number}.jpg"]
     paths = [r[1] for r in rows]
     return names, paths
 
@@ -278,17 +287,26 @@ async def download_all_templates(
             detail = "No extracted tags to export yet."
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail)
 
+    # Keyed by AssetTag.tag_number, but matched through asset_tag_id too —
+    # same reason as _photos_of.
+    tag_numbers = {t.tag_number for t in tags}
+    tag_by_id = {t.id: t.tag_number for t in tags}
     photo_rows = (
         await db.execute(
-            select(BatchItem.tag_number, TagImage.original_filename)
+            select(BatchItem.tag_number, BatchItem.asset_tag_id, TagImage.original_filename)
             .join(TagImage, TagImage.item_id == BatchItem.id)
-            .where(BatchItem.tag_number.in_([t.tag_number for t in tags]))
+            .where(or_(
+                BatchItem.tag_number.in_(tag_numbers),
+                BatchItem.asset_tag_id.in_(list(tag_by_id)),
+            ))
             .order_by(TagImage.id)
         )
     ).all()
     photos_by_tag: dict[str, list[str]] = {}
-    for tag_number, filename in photo_rows:
-        photos_by_tag.setdefault(tag_number, []).append(filename)
+    for item_tag_number, asset_tag_id, filename in photo_rows:
+        owners = {tag_by_id.get(asset_tag_id)} | ({item_tag_number} & tag_numbers)
+        for owner in owners - {None}:
+            photos_by_tag.setdefault(owner, []).append(filename)
 
     # First input filename per tag, keyed by asset_tag_id rather than tag
     # number, so a tag whose number was taken from the plate (and so no
@@ -424,7 +442,7 @@ async def save_tag(
         await db.execute(
             select(TagImage.original_filename, TagImage.stored_path)
             .join(BatchItem, BatchItem.id == TagImage.item_id)
-            .where(BatchItem.tag_number == tag.tag_number)
+            .where(_photos_of(tag))
             .order_by(TagImage.id)
         )
     ).all()
@@ -468,7 +486,7 @@ async def _download(db, tag: AssetTag, kind: str, user: User | None) -> FileResp
         # the row, including both payloads, replicates — the generated file on disk
         # never does. Rebuild it here from the payload data, which did sync.
         try:
-            photo_names, photo_paths = await _photo_names_and_paths(db, tag.tag_number)
+            photo_names, photo_paths = await _photo_names_and_paths(db, tag)
             await generate_workbooks(db, tag, photo_names, photo_paths)
             await db.commit()
             path = resolve_stored(
@@ -506,7 +524,7 @@ async def download_ai(
     if not already_extracted:
         return await _download(db, tag, "ai", user)
 
-    photo_names, photo_paths = await _photo_names_and_paths(db, tag.tag_number)
+    photo_names, photo_paths = await _photo_names_and_paths(db, tag)
     content = build_ai_workbook(
         tag.ai_payload, tag.tag_number, tag.description, photo_names,
         images=_read_photo_bytes(photo_paths), status_note=ALREADY_EXTRACTED_NOTE,

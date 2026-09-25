@@ -136,25 +136,13 @@ def normalise_payload(
 
 
 def reconcile_tag_number(raw: dict, filename_tag_number: str) -> tuple[str, str]:
-    """Prefer the tag number actually printed on the nameplate over the one
-    parsed from the filename — but only when the AI found one on the plate
-    and it disagrees with the filename. No independent read (or one that
-    just confirms the filename) changes nothing.
-
-    Returns (tag_number, quality), same criteria as `reconcile_description`:
-    "Confirmed" when the filename's tag number stands unchallenged (Claude
-    found nothing on the plate, or its reading agrees), "Verify" when
-    Claude's independent plate reading disagrees — one of the two is wrong,
-    so a reviewer needs to say which.
+    """The filename is the source of truth for the tag number: always
+    returns (filename_tag_number, "Confirmed"). Claude's own plate reading
+    never replaces it — that reading is kept separately (see
+    `photo_tag_number`) for the Template workbook's ASSET TAG NUMBER column,
+    which is where a disagreement is surfaced.
     """
-    raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
-    entry = raw_fields.get("tag_number")
-    photo_value = str(entry.get("value", "") or "").strip() if isinstance(entry, dict) else ""
-    if is_blank(photo_value):
-        return filename_tag_number, QUALITY_CONFIRMED
-    if photo_value.upper() == filename_tag_number.strip().upper():
-        return filename_tag_number, QUALITY_CONFIRMED
-    return photo_value.upper(), QUALITY_VERIFY
+    return filename_tag_number, QUALITY_CONFIRMED
 
 
 def photo_tag_number(raw: dict) -> str:

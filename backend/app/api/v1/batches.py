@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -611,11 +611,19 @@ async def get_photo_by_link(
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "This photo link is invalid or has expired."
         )
+    # The token carries AssetTag.tag_number, which can differ from the
+    # filename-derived BatchItem.tag_number when the AI's plate reading won
+    # (see pipeline.py's final_tag_number) — so also match the tag's photos
+    # through BatchItem.asset_tag_id, not by tag number alone.
+    asset_tag_id = await db.scalar(select(AssetTag.id).where(AssetTag.tag_number == tag_number))
+    match = BatchItem.tag_number == tag_number
+    if asset_tag_id is not None:
+        match = or_(match, BatchItem.asset_tag_id == asset_tag_id)
     images = (
         await db.scalars(
             select(TagImage)
             .join(BatchItem, BatchItem.id == TagImage.item_id)
-            .where(BatchItem.tag_number == tag_number)
+            .where(match)
             .order_by(TagImage.id)
         )
     ).all()
