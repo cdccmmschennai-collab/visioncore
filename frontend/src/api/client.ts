@@ -254,7 +254,10 @@ export const api = {
   },
   // Same endpoints as downloadAi/downloadTemplate above, as raw bytes instead
   // of a browser download — used by src/services/localHelper.ts.
-  fetchAiBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/ai`),
+  // `alreadyExtracted` asks for the copy marked "ALREADY EXTRACTED" — for a
+  // Batch Process tag that was skipped because an earlier batch extracted it.
+  fetchAiBlob: (tag: AssetTag, alreadyExtracted = false) =>
+    fetchBlob(`/tags/${tag.id}/download/ai${alreadyExtracted ? '?already_extracted=true' : ''}`),
   fetchTemplateBlob: (tag: AssetTag) => fetchBlob(`/tags/${tag.id}/download/template`),
   // Same consolidated-workbook endpoint as downloadSelectedTemplates below,
   // as raw bytes instead of a browser download — used to write the Batch

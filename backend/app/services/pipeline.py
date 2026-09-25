@@ -143,6 +143,7 @@ async def generate_workbooks(
         "output_file": output_cell,
         "ai_excel_url": ai_excel_download_url(asset_tag.tag_number),
         "input_photo_url": photo_view_url(asset_tag.tag_number) if photo_names else None,
+        "input_filename": photo_names[0] if photo_names else None,
     }])
 
     ai_path = write_export(asset_tag.tag_number, ai_output_name(stem), ai_bytes)

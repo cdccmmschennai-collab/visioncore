@@ -109,14 +109,19 @@ export default function NewBatch() {
   /** Copies one just-completed tag's AI Output workbook into
    * `<picked folder>/AI Extraction/`, mirroring what the server used to do
    * for a local-only deployment. Best-effort — never blocks or fails the
-   * extraction itself. */
+   * extraction itself. A tag this run skipped because an earlier batch had
+   * already extracted it (status 'duplicate') is still written, but as a
+   * copy marked "ALREADY EXTRACTED" inside and in its filename. */
   const writeAiExtractionCopy = useCallback(
     async (dir: FSDirectoryHandle, item: BatchItem) => {
       if (!item.asset_tag) return
+      const alreadyExtracted = item.status === 'duplicate'
       try {
-        const blob = await api.fetchAiBlob(item.asset_tag)
+        const blob = await api.fetchAiBlob(item.asset_tag, alreadyExtracted)
         await writeFileToFolder(
-          dir, 'AI Extraction', `AI Extraction_${item.tag_number}-${item.description}.xlsx`, blob,
+          dir, 'AI Extraction',
+          `AI Extraction_${item.tag_number}-${item.description}${alreadyExtracted ? ' (Already Extracted)' : ''}.xlsx`,
+          blob,
         )
       } catch (err) {
         warnWriteBackFailure(`AI Extraction copy for ${item.tag_number}`, err)

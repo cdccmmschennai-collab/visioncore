@@ -32,6 +32,7 @@ from app.services.fields import (
     quality_of,
     value_of,
 )
+from app.services.filename_parser import tag_number_from_filename
 
 TITLE_COLOR = "FF1F3864"
 SUBTITLE_COLOR = "FF595959"
@@ -128,9 +129,18 @@ def _sheet_title(tag_number: str, description: str) -> str:
     return title[:31]
 
 
+#: Banner written into the (otherwise blank) row 3 of a copy handed out for a
+#: tag a batch skipped because it had already been extracted earlier.
+ALREADY_EXTRACTED_NOTE = (
+    "ALREADY EXTRACTED — this tag was extracted in an earlier batch and "
+    "was not re-processed in this run."
+)
+
+
 def build_ai_workbook(payload: dict, tag_number: str, description: str,
                       source_filenames: list[str],
-                      images: list[bytes] | None = None) -> bytes:
+                      images: list[bytes] | None = None,
+                      status_note: str | None = None) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = _sheet_title(tag_number, description)
@@ -155,6 +165,16 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
     ws["A2"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
     ws.row_dimensions[2].height = 27.95
 
+    # Row 3 is blank in the reference layout; a status note, when given, uses
+    # it so nothing below shifts.
+    if status_note:
+        ws.merge_cells("A3:C3")
+        ws["A3"] = status_note
+        ws["A3"].font = Font(name="Calibri", size=11, bold=True, color=VERIFY_TEXT)
+        ws["A3"].fill = PatternFill("solid", fgColor=VERIFY_FILL)
+        ws["A3"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        ws.row_dimensions[3].height = 30.0
+
     # ── Table header (row 4; row 3 is deliberately blank) ────────────────────
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFFFF")
     header_fill = PatternFill("solid", fgColor=HEADER_FILL)
@@ -178,6 +198,14 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
         a.font, a.fill, a.alignment, a.border = label_font, label_fill, left_top, BORDER
 
         value = value_of(payload, field.key)
+        # Tag Number shows the input filename's tag (same as the Template
+        # workbook) and is never marked Verify — it's given, not read.
+        filename_tag = (
+            tag_number_from_filename(source_filenames[0])
+            if field.key == "tag_number" and source_filenames else ""
+        )
+        if filename_tag:
+            value = filename_tag
         b = ws.cell(row=row, column=2, value=value)
         b.font, b.alignment, b.border = body_font, left_top, BORDER
         # Force text format so Excel never renders "02" as the number 2.
@@ -185,7 +213,7 @@ def build_ai_workbook(payload: dict, tag_number: str, description: str,
             b.number_format = "@"
 
         missing = is_blank(value)
-        quality = quality_of(payload, field.key)
+        quality = QUALITY_CONFIRMED if field.key == "tag_number" else quality_of(payload, field.key)
         confirmed = quality == QUALITY_CONFIRMED
         c = ws.cell(row=row, column=3, value=MISSING_LABEL if missing else quality)
         c.font = Font(

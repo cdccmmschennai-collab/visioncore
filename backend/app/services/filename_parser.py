@@ -180,6 +180,18 @@ def parse_filename(filename: str) -> ParsedName:
     return _split_tag_description(stem, example="12-4020-BV-0074-BALL VALVE.jpg")
 
 
+def tag_number_from_filename(filename: str | None) -> str:
+    """Just the tag number part of an input photo's filename, for display in
+    the workbooks' Tag Number cells (`22-4203-BV-0105-BALL VALVE.jpg` ->
+    `22-4203-BV-0105`, `22-4202-TW-0021.jpg` -> `22-4202-TW-0021`). "" when
+    there's no filename or it doesn't parse.
+    """
+    if not filename:
+        return ""
+    parsed = parse_filename(filename)
+    return parsed.tag_number or parsed.tag_only_candidate
+
+
 def parse_folder_name(folder_name: str) -> ParsedName:
     """Same `<TAG>-<DESCRIPTION>` convention, applied to a subfolder's name.
 
